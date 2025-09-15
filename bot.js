@@ -1,30 +1,34 @@
 // bot.js — Discord Disputes Bot (ESM, Node 18+)
-// -------------------------------------------------
 
 import 'dotenv/config';
+import {
+  Client, GatewayIntentBits, Partials, Events, ChannelType,
+  ThreadAutoArchiveDuration, SlashCommandBuilder, Routes, REST,
+  PermissionFlagsBits
+} from 'discord.js';
 
-// DEBUG: show whether the container can see your vars
+// ====== ENV & DEBUG ======
+const token = (process.env.DISCORD_TOKEN ?? '').trim();
+
+// Debug (no secrets)
 const debugKeys = Object.keys(process.env)
-  .filter(k => k.startsWith('DISCORD') || k.startsWith('RAILWAY') || k === 'NODE_VERSION' || k === 'PING')
+  .filter(k => k.startsWith('DISCORD') || k.startsWith('RAILWAY') || k === 'NODE_VERSION')
   .sort();
 console.log('ENV KEYS SEEN:', debugKeys);
-
-const token = (process.env.DISCORD_TOKEN ?? '').trim();
 console.log('DISCORD_TOKEN length:', token ? token.length : 0);
 
 if (!token || !token.includes('.')) {
-  console.error('❌ DISCORD_TOKEN missing/invalid. Set it in Railway → Service → Variables (service-level), then redeploy.');
+  console.error('❌ DISCORD_TOKEN missing/invalid. Set it in Railway → Service → Variables.');
   process.exit(1);
 }
 
-
 const {
   GUILD_ID,
-  DISPUTE_CHANNEL_ID,            // #dispute-request (forum or normal channel)
-  REF_HUB_CHANNEL_ID,            // #dispute-referees (text channel where private threads are created)
-  REF_ROLE_ID,                   // @referee role ID
-  JR_REF_ROLE_ID,                // @junior referee role ID
-  TRIGGER_ROLE_ID,               // which role mention triggers the bot (usually same as REF_ROLE_ID)
+  DISPUTE_CHANNEL_ID,
+  REF_HUB_CHANNEL_ID,
+  REF_ROLE_ID,
+  JR_REF_ROLE_ID,
+  TRIGGER_ROLE_ID,
   COUNTRY_ROLE_PREFIX = 'Country: '
 } = process.env;
 
