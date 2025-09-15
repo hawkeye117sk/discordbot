@@ -1,6 +1,18 @@
 // bot.js
 import 'dotenv/config';
 
+// DEBUG: show what env keys we actually have (no secrets printed)
+const keys = Object.keys(process.env).filter(k => k.startsWith('DISCORD') || k.startsWith('RAILWAY') || k === 'NODE_VERSION');
+console.log('ENV KEYS SEEN BY PROCESS:', keys);
+
+const token = (process.env.DISCORD_TOKEN || '').trim();
+if (!token || !token.includes('.')) {
+  console.error('❌ DISCORD_TOKEN missing/invalid (not set, or trimmed). Set it in Railway → Service → Variables.');
+  process.exit(1);
+}
+
+import 'dotenv/config';
+
 const raw = process.env.DISCORD_TOKEN ?? '';
 const token = raw.trim();
 
