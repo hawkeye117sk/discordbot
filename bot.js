@@ -2,18 +2,21 @@
 // -------------------------------------------------
 
 import 'dotenv/config';
-import {
-  Client, GatewayIntentBits, Partials, Events, ChannelType,
-  ThreadAutoArchiveDuration, SlashCommandBuilder, Routes, REST,
-  PermissionFlagsBits
-} from 'discord.js';
 
-// ====== ENV & SAFETY CHECKS ======
+// DEBUG: show whether the container can see your vars
+const debugKeys = Object.keys(process.env)
+  .filter(k => k.startsWith('DISCORD') || k.startsWith('RAILWAY') || k === 'NODE_VERSION' || k === 'PING')
+  .sort();
+console.log('ENV KEYS SEEN:', debugKeys);
+
 const token = (process.env.DISCORD_TOKEN ?? '').trim();
+console.log('DISCORD_TOKEN length:', token ? token.length : 0);
+
 if (!token || !token.includes('.')) {
   console.error('❌ DISCORD_TOKEN missing/invalid. Set it in Railway → Service → Variables (service-level), then redeploy.');
   process.exit(1);
 }
+
 
 const {
   GUILD_ID,
