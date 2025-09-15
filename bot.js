@@ -1,5 +1,17 @@
 // bot.js
 import 'dotenv/config';
+
+const raw = process.env.DISCORD_TOKEN ?? '';
+const token = raw.trim();
+
+if (!token || !token.includes('.')) { // Discord tokens have dots
+  console.error('❌ DISCORD_TOKEN missing/invalid (not set, or trimmed). Set it in Railway → Service → Variables.');
+  process.exit(1);
+}
+console.log(`✅ Token loaded (length ${token.length}).`);
+client.login(token);
+
+import 'dotenv/config';
 import {
   Client, GatewayIntentBits, Partials, Events, ChannelType,
   ThreadAutoArchiveDuration, SlashCommandBuilder, Routes, REST,
