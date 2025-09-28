@@ -27,7 +27,7 @@ const {
   REF_ROLE_ID,
   JR_REF_ROLE_ID,
   TRIGGER_ROLE_ID,
-  COUNTRY_ROLE_PREFIX = 'Country: ',
+  // COUNTRY_ROLE_PREFIX is no longer used; bracket roles are used instead
 } = process.env;
 
 const requiredEnv = {
@@ -70,46 +70,44 @@ const client = new Client({
 });
 
 // ====== UTILS ======
-const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const BRACKET_ROLE = /\[.+\]/; // any role whose name contains [ ... ]
 
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 function messageMentionsRole(message, roleId) {
   return message.mentions.roles.has(roleId) || message.content.includes(`<@&${roleId}>`);
 }
 
-// Country from a member's roles
+// Country from a member's roles → first role whose name contains [ ]
 function getMemberCountry(member) {
-  const role = member.roles.cache.find(r => r.name.startsWith(COUNTRY_ROLE_PREFIX));
-  if (!role) return { name: null, roleId: null };
-  return { name: role.name.slice(COUNTRY_ROLE_PREFIX.length), roleId: role.id };
+  const role = member.roles.cache.find(r => BRACKET_ROLE.test(r.name));
+  return role ? { name: role.name, roleId: role.id } : { name: null, roleId: null };
 }
-const fmtCountry = ({ name, roleId }) => roleId ? `<@&${roleId}>` : (name || 'Unknown');
 
-// Try to find opponent country in the message (role mention or text)
-function getOpponentCountryFromMessage(message, excludeCountryName) {
-  // Prefer explicit role mentions that look like country roles
+// Opponent country from the message → prefer role mentions with [ ], else text match, else forum tag with [ ]
+function getOpponentCountryFromMessage(message, excludeName) {
   for (const role of message.mentions.roles.values()) {
-    if (role.name.startsWith(COUNTRY_ROLE_PREFIX)) {
-      const bare = role.name.slice(COUNTRY_ROLE_PREFIX.length);
-      if (!excludeCountryName || bare.toLowerCase() !== (excludeCountryName || '').toLowerCase()) {
-        return { name: bare, roleId: role.id };
+    if (BRACKET_ROLE.test(role.name)) {
+      const nm = role.name;
+      if (!excludeName || nm.toLowerCase() !== (excludeName || '').toLowerCase()) {
+        return { name: nm, roleId: role.id };
       }
     }
   }
-  // Fallback: scan text for any country role names
   const content = (message.content || '').toLowerCase();
-  const allCountryRoles = message.guild.roles.cache.filter(r => r.name.startsWith(COUNTRY_ROLE_PREFIX));
-  for (const role of allCountryRoles.values()) {
-    const bare = role.name.slice(COUNTRY_ROLE_PREFIX.length);
-    if (bare && content.includes(bare.toLowerCase()) && bare.toLowerCase() !== (excludeCountryName || '').toLowerCase()) {
-      return { name: bare, roleId: role.id };
+  const candidates = message.guild.roles.cache.filter(r => BRACKET_ROLE.test(r.name));
+  for (const role of candidates.values()) {
+    const nm = role.name;
+    if (content.includes(nm.toLowerCase()) &&
+        (!excludeName || nm.toLowerCase() !== (excludeName || '').toLowerCase())) {
+      return { name: nm, roleId: role.id };
     }
   }
-  // Forum tags fallback → plain text name
   if (message.channel?.type === ChannelType.PublicThread && message.channel.parent?.type === ChannelType.GuildForum) {
     const applied = message.channel.appliedTags || [];
     for (const tagId of applied) {
       const tag = message.channel.parent.availableTags.find(t => t.id === tagId);
-      if (tag && tag.name.toLowerCase() !== (excludeCountryName || '').toLowerCase()) {
+      if (tag && BRACKET_ROLE.test(tag.name) &&
+          (!excludeName || tag.name.toLowerCase() !== (excludeName || '').toLowerCase())) {
         return { name: tag.name, roleId: null };
       }
     }
@@ -117,7 +115,10 @@ function getOpponentCountryFromMessage(message, excludeCountryName) {
   return { name: null, roleId: null };
 }
 
-// Find result posting channel that contains both country slugs
+// Render as a role mention if we have the roleId; else plain name
+const fmtCountry = (c) => c?.roleId ? `<@&${c.roleId}>` : (c?.name || 'Unknown');
+
+// Find result channel that contains both country slugs (best effort)
 async function findDecisionChannel(guild, countryA, countryB) {
   if (!countryA || !countryB) return null;
   const a = slug(countryA), b = slug(countryB);
@@ -137,7 +138,7 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   const player = disputeMessage.author;
   const playerName = player.globalName || player.username;
   const thread = await refHub.threads.create({
-    name: `Dispute - ${playerName}`,               // <— requested naming
+    name: `Dispute - ${playerName}`,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     type: ChannelType.PrivateThread,
     invitable: false,
@@ -145,10 +146,8 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
 
   const refRoleMention = `<@&${REF_ROLE_ID}>`;
   const jrRoleMention  = `<@&${JR_REF_ROLE_ID}>`;
-
   const countriesLine = `Countries: ${fmtCountry(playerCountry)} and ${fmtCountry(oppCountry)}`;
 
-  // ONE seed post — no user mentions
   await thread.send(
     [
       `${refRoleMention} ${jrRoleMention}`,
@@ -161,24 +160,22 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   return thread;
 }
 
-async function removeConflictedRefs(thread, guild, countries) {
-  const names = countries.filter(Boolean);
+// Remove conflicted refs: any ref who has a bracketed role that matches either country name
+async function removeConflictedRefs(thread, guild, countryNames) {
+  const names = countryNames.filter(Boolean).map(n => n.toLowerCase());
   if (!names.length) return;
-
-  const roleNames = names.map(c => COUNTRY_ROLE_PREFIX + c);
-  const conflictedRoleIds = guild.roles.cache.filter(r => roleNames.includes(r.name)).map(r => r.id);
-  if (!conflictedRoleIds.length) return;
 
   await thread.members.fetch().catch(() => {});
   const allMembers = await guild.members.fetch();
   const refs = allMembers.filter(m => m.roles.cache.has(REF_ROLE_ID) || m.roles.cache.has(JR_REF_ROLE_ID));
+
   for (const member of refs.values()) {
-    const hasConflict = member.roles.cache.some(r => conflictedRoleIds.includes(r.id));
+    const hasConflict = member.roles.cache.some(r => BRACKET_ROLE.test(r.name) && names.includes(r.name.toLowerCase()));
     if (hasConflict) await thread.members.remove(member.id).catch(() => {});
   }
 }
 
-// --- DM helper: send questions (no "Dispute Review" line) ---
+// --- DM helper: send questions (no “Dispute Review” line) ---
 async function dmDisputeRaiser(message, disputeThread) {
   const user = message.author;
   const name = user.globalName || user.username;
@@ -212,7 +209,8 @@ async function dmDisputeRaiser(message, disputeThread) {
 
 // ====== MESSAGE HANDLERS ======
 
-// 1) Trigger from dispute area → create Dispute Thread + DM player (NO public questions)
+// 1) Trigger from dispute area → create Dispute Thread + DM player (NO public questions).
+//    If opponent country not detected → ask to re-raise with opponent country and exit.
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
@@ -223,10 +221,19 @@ client.on(Events.MessageCreate, async (message) => {
     const mentioned = messageMentionsRole(message, TRIGGER_ROLE_ID);
     if (!inDispute || !mentioned) return;
 
-    // Resolve countries
+    // Player/opponent countries
     const member = await message.guild.members.fetch(message.author.id);
     const playerCountry = getMemberCountry(member);
     const opponentCountry = getOpponentCountryFromMessage(message, playerCountry.name);
+
+    // 🔒 Require an opponent country
+    if (!opponentCountry.name) {
+      await message.reply({
+        content: 'I couldn’t detect an **opponent country**. Please **re-raise the issue and tag the opponent country role** (e.g., a role whose name includes `[XX]`).',
+        allowedMentions: { parse: [] }
+      });
+      return;
+    }
 
     // Create/use thread
     const isForumThread =
@@ -239,7 +246,6 @@ client.on(Events.MessageCreate, async (message) => {
       refThread = await createRefThread(message.guild, message, playerCountry, opponentCountry);
       if (disputeThread) disputeToRefThread.set(disputeThread.id, refThread.id);
 
-      // Try to detect decision channel
       const dc = await findDecisionChannel(message.guild, playerCountry.name, opponentCountry.name);
       if (dc && disputeThread) disputeToDecisionChan.set(disputeThread.id, dc.id);
 
@@ -252,7 +258,7 @@ client.on(Events.MessageCreate, async (message) => {
     closedPlayers.delete(message.author.id);
     refThreadToOrigin.set(refThread.id, { channelId: message.channel.id, messageId: message.id });
 
-    // DM the player (no public post)
+    // DM the player (no public message)
     await dmDisputeRaiser(message, disputeThread);
 
   } catch (err) {
@@ -260,7 +266,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// 2) Mirror messages in dispute area (safety; many servers won’t use this path)
+// 2) Mirror messages in dispute area (optional safety path)
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
@@ -296,7 +302,6 @@ client.on(Events.MessageCreate, async (message) => {
     if (!refThreadId) return;
 
     if (closedPlayers.has(uid)) {
-      // Do not reopen/post in thread; just inform the user
       try { await message.reply('This dispute is **Closed**. Your DM was not forwarded.'); } catch {}
       return;
     }
@@ -351,13 +356,13 @@ const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('close')
-    .setDescription('Close this dispute: archive+lock, stop mirroring, DM player, delete original message.')
+    .setDescription('Close dispute: archive+lock, stop mirroring, DM player, delete original message.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('reopen')
-    .setDescription('Reopen this dispute: unarchive+unlock and resume DM mirroring.')
+    .setDescription('Reopen dispute: unarchive+unlock and resume DM mirroring.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 ];
@@ -436,7 +441,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const teamRuleLines = teamRuleText(rule);
       const body = [
-        'Post: (countries not detected)', // keep simple for now; can enhance later
+        'Post: (countries not detected)', // simple header; can be improved to parse thread name
         '',
         '@Playername1 @Playername2',
         `After reviewing the match dispute set by <@${interaction.user.id}> regarding ${issue}. The Referees team has decided that a rematch **${grant}** be granted.`,
