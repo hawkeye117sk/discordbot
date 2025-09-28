@@ -27,7 +27,8 @@ const {
   REF_ROLE_ID,
   JR_REF_ROLE_ID,
   TRIGGER_ROLE_ID,
-  COUNTRY_ROLE_PREFIX = 'Country: '
+  COUNTRY_ROLE_PREFIX = 'Country: ',
+  DISPUTE_REVIEW_CHANNEL_ID // optional; channel where closed users should follow up
 } = process.env;
 
 const requiredEnv = {
@@ -50,11 +51,12 @@ const PRESET_QUERIES = [
 ];
 
 // ====== STATE ======
-const disputeToRefThread = new Map();      // disputeThreadId -> refThreadId
+const disputeToRefThread = new Map();      // disputeThreadId -> refThreadId (if originating from a forum thread)
 const disputeToDecisionChan = new Map();   // disputeThreadId -> decisionChannelId
 const playerToRefThread = new Map();       // userId -> refThreadId
-const refThreadToPlayer = new Map();       // refThreadId -> userId (for commands)
-const closedPlayers = new Set();           // userId set => DM mirroring disabled
+const refThreadToPlayer = new Map();       // refThreadId -> userId
+const closedPlayers = new Set();           // userId => closed
+const refThreadToOrigin = new Map();       // refThreadId -> { channelId, messageId } for deleting the original dispute message
 
 // ====== CLIENT ======
 const client = new Client({
@@ -130,7 +132,7 @@ async function findDecisionChannel(guild, countryA, countryB) {
 async function createRefThread(guild, disputeMessage, countries) {
   const refHub = await guild.channels.fetch(REF_HUB_CHANNEL_ID);
   if (!refHub || refHub.type !== ChannelType.GuildText) {
-    throw new Error('#disputes-referees must be a TEXT channel that allows private threads.');
+    throw new Error('#dispute-referees must be a TEXT channel that allows private threads.');
   }
 
   const player = disputeMessage.author;
@@ -196,6 +198,10 @@ async function dmDisputeRaiser(message, disputeThread) {
     ? `https://discord.com/channels/${message.guild.id}/${disputeThread.id}`
     : message.url;
 
+  const reviewLine = DISPUTE_REVIEW_CHANNEL_ID
+    ? `If your case is later Closed, follow up in <#${DISPUTE_REVIEW_CHANNEL_ID}>.`
+    : `If your case is later Closed, follow up in the **Dispute Review** channel.`;
+
   const text = [
     `Hi ${name}, this is the **Gymbreakers Referee Team**.`,
     `Please send all evidence and messages **in this DM**. We’ll mirror everything privately for the referees.`,
@@ -204,7 +210,9 @@ async function dmDisputeRaiser(message, disputeThread) {
     ...PRESET_QUERIES.map(q => `• ${q}`),
     '',
     `Reference link to your dispute:`,
-    link
+    link,
+    '',
+    reviewLine
   ].join('\n');
 
   try {
@@ -264,7 +272,7 @@ client.on(Events.MessageCreate, async (message) => {
       if (disputeThread) disputeToRefThread.set(disputeThread.id, refThread.id);
 
       if (countries.length >= 2) {
-        const decisionChan = await findDecisionChannel(message.guild, countries[0], countries[1]);
+        const decisionChan = await findDecisionChannel(message.guild, countries[0], message.guild, countries[1]);
         if (decisionChan) {
           if (disputeThread) disputeToDecisionChan.set(disputeThread.id, decisionChan.id);
           await refThread.send(`📣 Default decision channel detected: <#${decisionChan.id}>`);
@@ -290,10 +298,11 @@ client.on(Events.MessageCreate, async (message) => {
       ].filter(Boolean).join('\n'),
     );
 
-    // Map the player ↔ Dispute Thread
+    // Map the player ↔ Dispute Thread and remember the original message
     playerToRefThread.set(message.author.id, refThread.id);
     refThreadToPlayer.set(refThread.id, message.author.id);
-    closedPlayers.delete(message.author.id); // ensure open
+    closedPlayers.delete(message.author.id);
+    refThreadToOrigin.set(refThread.id, { channelId: message.channel.id, messageId: message.id });
 
     // DM them the questions & instructions (no public message)
     await dmDisputeRaiser(message, disputeThread);
@@ -371,7 +380,6 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-
 // ====== SLASH COMMANDS ======
 function teamRuleText(rule) {
   switch (rule) {
@@ -418,13 +426,13 @@ const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('close')
-    .setDescription('Mark this dispute as Closed (player DM mirroring is disabled). Use inside the Dispute Thread.')
+    .setDescription('Close this dispute (archive+lock thread, stop DM mirroring, DM player, delete original dispute message). Use inside the Dispute Thread.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('reopen')
-    .setDescription('Reopen this dispute (resume player DM mirroring). Use inside the Dispute Thread.')
+    .setDescription('Reopen this dispute (unarchive/unlock and resume DM mirroring). Use inside the Dispute Thread.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 ];
@@ -444,27 +452,75 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'close') {
-    const userId = await getPlayerFromCurrentThread();
-    if (!userId) return interaction.reply({ ephemeral: true, content: 'Could not resolve the dispute’s player from this thread.' });
+    const ch = interaction.channel;
+    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
+    const userId =
+      isThread
+        ? (refThreadToPlayer.get(ch.id)
+           || [...playerToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0]
+           || null)
+        : null;
 
+    if (!isThread || !userId) {
+      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (couldn’t resolve the player).' });
+    }
+
+    // Mark closed
     closedPlayers.add(userId);
-    await interaction.reply({ ephemeral: true, content: 'Marked dispute as **Closed**. Player DM mirroring is now disabled.' });
+
+    // Archive & lock the thread (Discord "Close")
+    try { await ch.setArchived(true, 'Closed by /close'); } catch {}
+    try { await ch.setLocked(true, 'Closed by /close'); } catch {}
+
+    // DM the player: closed + where to go
     try {
-      await interaction.channel.send('🔒 This dispute is now **Closed**. Further player DMs will not be mirrored.');
+      const user = await client.users.fetch(userId).catch(() => null);
+      if (user) {
+        const reviewLine = DISPUTE_REVIEW_CHANNEL_ID
+          ? `Please follow up in <#${DISPUTE_REVIEW_CHANNEL_ID}> if needed.`
+          : `Please follow up in the **Dispute Review** channel if needed.`;
+        await user.send(`Your dispute has been **Closed**. Your DMs to this bot will not be forwarded. ${reviewLine}`);
+      }
     } catch {}
-    return;
+
+    // Delete original dispute message if we stored it
+    try {
+      const origin = refThreadToOrigin.get(ch.id);
+      if (origin?.channelId && origin?.messageId) {
+        const oChan = await client.channels.fetch(origin.channelId).catch(() => null);
+        if (oChan && oChan.isTextBased?.()) {
+          const msg = await oChan.messages.fetch(origin.messageId).catch(() => null);
+          if (msg && msg.deletable) await msg.delete().catch(() => {});
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ Could not delete original dispute message:', e?.message || e);
+    }
+
+    return interaction.reply({ ephemeral: true, content: 'Dispute **Closed**: thread archived & locked, player notified, original message deleted (if permitted).' });
   }
 
   if (interaction.commandName === 'reopen') {
-    const userId = await getPlayerFromCurrentThread();
-    if (!userId) return interaction.reply({ ephemeral: true, content: 'Could not resolve the dispute’s player from this thread.' });
+    const ch = interaction.channel;
+    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
+    const userId =
+      isThread
+        ? (refThreadToPlayer.get(ch.id)
+           || [...playerToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0]
+           || null)
+        : null;
+
+    if (!isThread || !userId) {
+      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (couldn’t resolve the player).' });
+    }
 
     closedPlayers.delete(userId);
-    await interaction.reply({ ephemeral: true, content: 'Marked dispute as **Open**. Player DM mirroring resumed.' });
-    try {
-      await interaction.channel.send('🔓 This dispute has been **Reopened**. Player DMs will be mirrored again.');
-    } catch {}
-    return;
+
+    // Unarchive & unlock
+    try { await ch.setArchived(false, 'Reopened by /reopen'); } catch {}
+    try { await ch.setLocked(false, 'Reopened by /reopen'); } catch {}
+
+    return interaction.reply({ ephemeral: true, content: 'Dispute **Reopened**: DM mirroring resumed.' });
   }
 
   if (interaction.commandName === 'decision') {
@@ -502,7 +558,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       } catch {}
 
-      // Try to detect main players mentioned in the dispute thread
+      // Try to detect main players mentioned in the original dispute
       let playersLine = '';
       if (disputeThreadId) {
         try {
