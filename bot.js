@@ -134,7 +134,8 @@ async function createRefThread(guild, disputeMessage, countries) {
     throw new Error('#dispute-referees must be a TEXT channel that allows private threads.');
   }
 
-  const playerName = disputeMessage.author.globalName || disputeMessage.author.username;
+  const player = disputeMessage.author;
+  const playerName = player.globalName || player.username;
   const threadName = `Ref – ${playerName} – ${countries.map(slug).join(' vs ') || 'dispute'}`;
 
   const thread = await refHub.threads.create({
@@ -145,44 +146,25 @@ async function createRefThread(guild, disputeMessage, countries) {
   });
 
   const refRoleMention = `<@&${REF_ROLE_ID}>`;
-  const jrRoleMention = `<@&${JR_REF_ROLE_ID}>`;
+  const jrRoleMention  = `<@&${JR_REF_ROLE_ID}>`;
   const countryLine = countries.length
     ? `**Countries:** ${countries.join(' vs ')}`
     : `**Countries:** (not detected)`;
 
+  // Seed info for refs only
   await thread.send(
-    [`${refRoleMention} ${jrRoleMention}`, `Ref thread for **${playerName}**.`, countryLine, `Dispute link: ${disputeMessage.url}`].join(
-      '\n',
-    ),
+    [
+      `${refRoleMention} ${jrRoleMention}`,
+      `Ref thread for **${playerName}**.`,
+      countryLine,
+      `Dispute link: ${disputeMessage.url}`,
+    ].join('\n')
   );
 
-  await thread.members.add(disputeMessage.author.id).catch(() => {});
+  // ❌ DO NOT add player to this private thread
+  // ❌ No DM from here either
+
   return thread;
-}
-
-async function removeConflictedRefs(thread, guild, countries) {
-  if (!countries.length) return;
-
-  const countryRoleNames = countries.map((c) => COUNTRY_ROLE_PREFIX + c);
-  const conflictedRoleIds = guild.roles.cache
-    .filter((r) => countryRoleNames.includes(r.name))
-    .map((r) => r.id);
-
-  if (!conflictedRoleIds.length) return;
-
-  await thread.members.fetch().catch(() => {});
-  const allMembers = await guild.members.fetch();
-
-  const refs = allMembers.filter((m) => m.roles.cache.has(REF_ROLE_ID) || m.roles.cache.has(JR_REF_ROLE_ID));
-
-  for (const member of refs.values()) {
-    const hasConflict = member.roles.cache.some((r) => conflictedRoleIds.includes(r.id));
-    if (hasConflict) {
-      await thread.members.remove(member.id).catch(() => {});
-    }
-  }
-
-  await thread.send(`🚫 Removed conflicted referees based on country roles: ${countries.join(' / ')}`);
 }
 
 // ====== MESSAGE HANDLERS ======
@@ -220,10 +202,21 @@ client.on(Events.MessageCreate, async (message) => {
     const disputeThread = isThread ? message.channel : null;
 
     if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
-      await message.channel.send(
-        `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`,
-      );
-    }
+  // Ask preset questions (once per dispute thread)
+  await message.channel.send(
+    `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
+  );
+
+  // Greet & instruct the player in the *dispute* thread (not the ref thread)
+  await message.reply({
+    content:
+      `👋 Hi <@${message.author.id}>, this is the **Gymbreakers Referee Team**.\n` +
+      `Please send any evidence and messages **here in this thread**. ` +
+      `We’ll mirror everything privately for the referees.`,
+    allowedMentions: { users: [message.author.id] } // only ping the author
+  });
+}
+
 
     const countries = await extractCountries(message);
     const opponent = extractOpponentTag(message);
