@@ -168,9 +168,57 @@ async function createRefThread(guild, disputeMessage, countries) {
 }
 
 // ====== MESSAGE HANDLERS ======
+async function dmDisputeRaiser(message, disputeThread) {
+  const user = message.author;
+  const name = user.globalName || user.username;
+
+  // Link to the *dispute* place (not the ref thread)
+  const link = disputeThread
+    ? `https://discord.com/channels/${message.guild.id}/${disputeThread.id}`
+    : message.url; // fallback to the original message link in a text channel
+
+  const text = [
+    `Hi ${name}, this is the **Gymbreakers Referee Team**.`,
+    `Please send any evidence and messages **in your dispute thread** so referees can review:`,
+    link
+  ].join('\n');
+
+  try {
+    await user.send(text);
+    console.log('📩 DM sent to', user.id);
+  } catch (e) {
+    console.log('⚠️ Could not DM user (DMs likely closed):', user.id, e?.message);
+    // Optional: lightly notify them in the dispute thread
+    try {
+      await message.reply({
+        content: `I tried to DM you but couldn’t (DMs disabled). Please continue here in this thread.`,
+        allowedMentions: { parse: [], users: [user.id] }
+      });
+    } catch {}
+  }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
+if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
+  // Ask preset questions (once per dispute thread)
+  await message.channel.send(
+    `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
+  );
+
+  // Greet & instruct the player in the *dispute* thread (not the ref thread)
+  await message.reply({
+    content:
+      `👋 Hi <@${message.author.id}>, this is the **Gymbreakers Referee Team**.\n` +
+      `Please send any evidence and messages **here in this thread**. ` +
+      `We’ll mirror everything privately for the referees.`,
+    allowedMentions: { users: [message.author.id] } // only ping the author
+  });
+
+  // ➕ ADD THIS LINE to DM them the thread link too
+  await dmDisputeRaiser(message, disputeThread);
+}
 
     // DEBUG: why we might be skipping
     const inDispute =
