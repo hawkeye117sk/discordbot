@@ -190,11 +190,30 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
 
-    const inDisputeChannel =
-      message.channel.id === DISPUTE_CHANNEL_ID || message.channel?.parentId === DISPUTE_CHANNEL_ID;
-    if (!inDisputeChannel) return;
+    // DEBUG: why we might be skipping
+    const inDispute =
+      message.channel.id === DISPUTE_CHANNEL_ID ||
+      message.channel?.parentId === DISPUTE_CHANNEL_ID;
+    const mentioned = messageMentionsRole(message, TRIGGER_ROLE_ID);
 
-    if (!messageMentionsRole(message, TRIGGER_ROLE_ID)) return;
+    if (inDispute && mentioned) {
+      console.log('✅ Trigger detected in dispute area',
+        'msgCh=', message.channel.id,
+        'parent=', message.channel?.parentId,
+        'roleMentions=', [...message.mentions.roles.keys()]
+      );
+    } else {
+      console.log('⏭️ Skipping message',
+        'inDispute=', inDispute,
+        'mentioned=', mentioned,
+        'msgCh=', message.channel.id,
+        'parent=', message.channel?.parentId,
+        'roleMentions=', [...message.mentions.roles.keys()]
+      );
+    }
+
+    if (!inDispute) return;
+    if (!mentioned) return;
 
     const isThread =
       message.channel.type === ChannelType.PublicThread || message.channel.type === ChannelType.PrivateThread;
@@ -323,96 +342,27 @@ const slashCommands = [
     .toJSON(),
 ];
 
-// ====== INTERACTIONS ======
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'decision') return;
-
-  try {
-    const current = interaction.channel;
-    if (current?.type !== ChannelType.PrivateThread && current?.type !== ChannelType.PublicThread) {
-      return interaction.reply({
-        ephemeral: true,
-        content: 'Use this command from within the ref thread (or specify a channel).',
-      });
-    }
-
-    const disputeThreadId =
-      [...disputeToRefThread.entries()].find(([, refId]) => refId === current.id)?.[0] || null;
-
-    const grant = interaction.options.getString('grant', true); // 'will' | 'will not'
-    const rule = interaction.options.getString('team_rule', true);
-    const issue = interaction.options.getString('issue', true);
-    const overrideChan = interaction.options.getChannel('channel', false);
-
-    let targetChannel = overrideChan;
-    if (!targetChannel) {
-      const auto = disputeThreadId ? disputeToDecisionChan.get(disputeThreadId) : null;
-      targetChannel = auto ? await interaction.guild.channels.fetch(auto).catch(() => null) : null;
-    }
-    if (!targetChannel) {
-      return interaction.reply({
-        ephemeral: true,
-        content: 'No target channel found. Provide one with /decision channel:...',
-      });
-    }
-
-    // Best-effort country header from ref thread name
-    let countries = [];
-    try {
-      const refThread = current;
-      if (refThread?.name?.includes('–')) {
-        const parts = refThread.name.split('–').map((s) => s.trim());
-        const vs = parts.pop();
-        if (vs?.includes('vs')) countries = vs.split('vs').map((s) => s.replace(/-/g, ' ').trim());
-      }
-    } catch {}
-
-    // Try to detect main players mentioned in the dispute thread
-    let playersLine = '';
-    if (disputeThreadId) {
-      try {
-        const disputeThread = await interaction.guild.channels.fetch(disputeThreadId);
-        const firstMsgs = await disputeThread.messages.fetch({ limit: 10 });
-        const mentions = new Set();
-        firstMsgs.forEach((m) => m.mentions?.users?.forEach((u) => mentions.add(u)));
-        if (mentions.size) {
-          playersLine = [...mentions].slice(0, 2).map((u) => `<@${u.id}>`).join(' ');
-        }
-      } catch {}
-    }
-
-    const header =
-      countries.length === 2
-        ? `Post: #${slug(countries[0])}-${slug(countries[1])}`
-        : `Post: (countries not detected)`;
-
-    const body = [
-      header,
-      '',
-      playersLine || '@Playername1 @Playername2',
-      `After reviewing the match dispute set by <@${interaction.user.id}> regarding ${issue}. The Referees team has decided that a rematch **${grant}** be granted.`,
-      '',
-      ...teamRuleText(rule),
-      '',
-      'We would like to remind all parties involved that referees and staff members from countries involved in disputes cannot be involved in the resolution of the dispute.',
-    ].join('\n');
-
-    await targetChannel.send(body);
-    await interaction.reply({ ephemeral: true, content: `Posted decision to <#${targetChannel.id}>.` });
-  } catch (e) {
-    console.error(e);
-    try {
-      await interaction.reply({ ephemeral: true, content: 'Failed to post decision. Check my permissions and try again.' });
-    } catch {}
-  }
-});
-
-// ====== READY (register commands) ======
+// ====== READY (config check + register commands) ======
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(token);
 
+  // CONFIG CHECK: resolve your configured guild/channel/role
+  try {
+    const g = await client.guilds.fetch(GUILD_ID);
+    const guild = await g.fetch();
+    const chan = await client.channels.fetch(DISPUTE_CHANNEL_ID).catch(() => null);
+    const trigRole = await guild.roles.fetch(TRIGGER_ROLE_ID).catch(() => null);
+    console.log('🔎 Config check:',
+      'guild=', guild?.name, `(${guild?.id})`,
+      '| disputeChannel=', chan?.name, `(${chan?.id})`, 'type=', chan?.type,
+      '| triggerRole=', trigRole?.name, `(${trigRole?.id})`
+    );
+  } catch (e) {
+    console.error('Config check failed:', e?.code || e?.message || e);
+  }
+
+  // Log & register in all guilds the bot is in
   try {
     const guilds = await client.guilds.fetch();
     console.log(
@@ -420,12 +370,12 @@ client.once(Events.ClientReady, async () => {
       [...guilds.values()].map((g) => `${g.name} (${g.id})`).join(', ') || '(none)',
     );
 
-    for (const [id, g] of guilds) {
+    for (const [id, g2] of guilds) {
       try {
         await rest.put(Routes.applicationGuildCommands(client.user.id, id), { body: slashCommands });
-        console.log(`✅ Commands registered in guild: ${g?.name || id} (${id})`);
+        console.log(`✅ Commands registered in guild: ${g2?.name || id} (${id})`);
       } catch (e) {
-        console.error(`❌ Failed to register in guild ${g?.name || id} (${id}):`, e?.code || e?.message || e);
+        console.error(`❌ Failed to register in guild ${g2?.name || id} (${id}):`, e?.code || e?.message || e);
       }
     }
   } catch (e) {
