@@ -399,43 +399,40 @@ const slashCommands = [
     .setName('decision')
     .setDescription('Post a dispute decision from the Dispute Thread.')
     .addStringOption((o) =>
-      o
-        .setName('grant')
-        .setDescription('Rematch granted?')
-        .setRequired(true)
-        .addChoices(
-          { name: 'will be granted', value: 'will' },
-          { name: 'will NOT be granted', value: 'will not' },
-        ),
+      o.setName('grant').setDescription('Rematch granted?').setRequired(true).addChoices(
+        { name: 'will be granted', value: 'will' },
+        { name: 'will NOT be granted', value: 'will not' },
+      ),
     )
     .addStringOption((o) =>
-      o
-        .setName('team_rule')
-        .setDescription('Team/lead rule to apply')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Same teams & same lead', value: 'same_teams_same_lead' },
-          { name: 'Same lead, backline may change', value: 'same_lead_flex_back' },
-          { name: 'New teams allowed', value: 'new_teams' },
-        ),
+      o.setName('team_rule').setDescription('Team/lead rule to apply').setRequired(true).addChoices(
+        { name: 'Same teams & same lead', value: 'same_teams_same_lead' },
+        { name: 'Same lead, backline may change', value: 'same_lead_flex_back' },
+        { name: 'New teams allowed', value: 'new_teams' },
+      ),
     )
-    .addStringOption((o) => o.setName('issue').setDescription('Short issue text to insert').setRequired(true))
-    .addChannelOption((o) => o.setName('channel').setDescription('Override target channel (optional)').setRequired(false))
+    .addStringOption((o) =>
+      o.setName('issue').setDescription('Short issue text to insert').setRequired(true),
+    )
+    .addChannelOption((o) =>
+      o.setName('channel').setDescription('Override target channel (optional)').setRequired(false),
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('close')
-    .setDescription('Close this dispute (archive+lock thread, stop DM mirroring, DM player, delete original dispute message). Use inside the Dispute Thread.')
+    .setDescription('Close this dispute: archive+lock, stop mirroring, DM player, delete original message.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('reopen')
-    .setDescription('Reopen this dispute (unarchive/unlock and resume DM mirroring). Use inside the Dispute Thread.')
+    .setDescription('Reopen this dispute: unarchive+unlock and resume DM mirroring.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 ];
+
 
 // Slash command logic
 client.on(Events.InteractionCreate, async (interaction) => {
