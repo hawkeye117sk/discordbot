@@ -198,10 +198,6 @@ async function dmDisputeRaiser(message, disputeThread) {
     ? `https://discord.com/channels/${message.guild.id}/${disputeThread.id}`
     : message.url;
 
-  const reviewLine = DISPUTE_REVIEW_CHANNEL_ID
-    ? `If your case is later Closed, follow up in <#${DISPUTE_REVIEW_CHANNEL_ID}>.`
-    : `If your case is later Closed, follow up in the **Dispute Review** channel.`;
-
   const text = [
     `Hi ${name}, this is the **Gymbreakers Referee Team**.`,
     `Please send all evidence and messages **in this DM**. We’ll mirror everything privately for the referees.`,
