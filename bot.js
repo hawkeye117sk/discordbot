@@ -259,11 +259,28 @@ client.on(Events.MessageCreate, async (message) => {
       message.channel.type === ChannelType.PrivateThread;
     const disputeThread = isThread ? message.channel : null;
 
-    // Ask preset questions + greet author + DM them (run once per dispute thread)
-    if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
-      await message.channel.send(
-        `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
-      );
+   // Ask preset questions + greet author + DM (run once)
+// - For forum threads: once per thread
+// - For plain text channels: once per author (guarded by playerToRefThread)
+const firstTime =
+  (disputeThread && !disputeToRefThread.has(disputeThread.id)) ||
+  (!disputeThread && !playerToRefThread.has(message.author.id));
+
+if (firstTime) {
+  await message.channel.send(
+    `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
+  );
+
+  await message.reply({
+    content:
+      `👋 Hi <@${message.author.id}>, this is the **Gymbreakers Referee Team**.\n` +
+      `Please send any evidence and messages **here**. We’ll mirror everything privately for the referees.`,
+    allowedMentions: { parse: [], users: [message.author.id] }
+  });
+
+  // DM the user a link to their dispute place (thread link if forum; message link if text channel)
+  await dmDisputeRaiser(message, disputeThread);
+}
 
       await message.reply({
         content:
