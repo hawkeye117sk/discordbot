@@ -327,31 +327,32 @@ client.on(Events.MessageCreate, async (message) => {
   } catch {}
 });
 
-// 3) Mirror player **DMs** into the Dispute Thread (blocked if Closed)
+// 3) Mirror player **DMs** into the Dispute Thread (silently drop when Closed)
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.author?.bot) return;
-    if (message.guild) return; // only handle DMs here
+    if (message.guild) return;                           // only handle DMs here
     if (message.channel?.type !== ChannelType.DM) return;
 
     const userId = message.author.id;
     const refThreadId = playerToRefThread.get(userId);
-    if (!refThreadId) return; // no active dispute mapping
+    if (!refThreadId) return;                            // no active dispute mapping
 
+    const reviewLine = DISPUTE_REVIEW_CHANNEL_ID
+      ? `Please post in <#${DISPUTE_REVIEW_CHANNEL_ID}> to follow up.`
+      : `Please post in the **Dispute Review** channel to follow up.`;
+
+    // If Closed: do NOT reopen/announce in the thread. Just tell the player and bail.
     if (closedPlayers.has(userId)) {
-      // Politely tell them it's closed; do not forward
       try {
         await message.reply(
-          'This dispute is **Closed**. Your messages are not being forwarded. ' +
-          'Please contact a referee if you believe it should be reopened.'
+          `This dispute is **Closed**. Your DM was not forwarded. ${reviewLine}`
         );
       } catch {}
-      // Optional: notify refs once per session? Keep it lightweight:
-      const t = await client.channels.fetch(refThreadId).catch(() => null);
-      await t?.send(`⚠️ Blocked DM from <@${userId}> because this dispute is **Closed**.`);
       return;
     }
 
+    // Not closed → mirror as usual
     const refThread = await client.channels.fetch(refThreadId).catch(() => null);
     if (!refThread) return;
 
@@ -369,6 +370,7 @@ client.on(Events.MessageCreate, async (message) => {
     console.error('DM mirror error:', e);
   }
 });
+
 
 // ====== SLASH COMMANDS ======
 function teamRuleText(rule) {
