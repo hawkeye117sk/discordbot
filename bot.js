@@ -167,15 +167,40 @@ async function createRefThread(guild, disputeMessage, countries) {
   return thread;
 }
 
-// ====== MESSAGE HANDLERS ======
+async function removeConflictedRefs(thread, guild, countries) {
+  if (!countries.length) return;
+
+  const countryRoleNames = countries.map((c) => COUNTRY_ROLE_PREFIX + c);
+  const conflictedRoleIds = guild.roles.cache
+    .filter((r) => countryRoleNames.includes(r.name))
+    .map((r) => r.id);
+
+  if (!conflictedRoleIds.length) return;
+
+  await thread.members.fetch().catch(() => {});
+  const allMembers = await guild.members.fetch();
+
+  const refs = allMembers.filter((m) => m.roles.cache.has(REF_ROLE_ID) || m.roles.cache.has(JR_REF_ROLE_ID));
+
+  for (const member of refs.values()) {
+    const hasConflict = member.roles.cache.some((r) => conflictedRoleIds.includes(r.id));
+    if (hasConflict) {
+      await thread.members.remove(member.id).catch(() => {});
+    }
+  }
+
+  await thread.send(`🚫 Removed conflicted referees based on country roles: ${countries.join(' / ')}`);
+}
+
+// --- DM helper: message the dispute raiser with their thread link ---
 async function dmDisputeRaiser(message, disputeThread) {
   const user = message.author;
   const name = user.globalName || user.username;
 
-  // Link to the *dispute* place (not the ref thread)
+  // Link to the *dispute* place (thread if forum; otherwise fall back to the message link)
   const link = disputeThread
     ? `https://discord.com/channels/${message.guild.id}/${disputeThread.id}`
-    : message.url; // fallback to the original message link in a text channel
+    : message.url;
 
   const text = [
     `Hi ${name}, this is the **Gymbreakers Referee Team**.`,
@@ -188,7 +213,7 @@ async function dmDisputeRaiser(message, disputeThread) {
     console.log('📩 DM sent to', user.id);
   } catch (e) {
     console.log('⚠️ Could not DM user (DMs likely closed):', user.id, e?.message);
-    // Optional: lightly notify them in the dispute thread
+    // Optional: lightly notify them in the dispute area
     try {
       await message.reply({
         content: `I tried to DM you but couldn’t (DMs disabled). Please continue here in this thread.`,
@@ -198,27 +223,10 @@ async function dmDisputeRaiser(message, disputeThread) {
   }
 }
 
+// ====== MESSAGE HANDLERS ======
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
-if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
-  // Ask preset questions (once per dispute thread)
-  await message.channel.send(
-    `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
-  );
-
-  // Greet & instruct the player in the *dispute* thread (not the ref thread)
-  await message.reply({
-    content:
-      `👋 Hi <@${message.author.id}>, this is the **Gymbreakers Referee Team**.\n` +
-      `Please send any evidence and messages **here in this thread**. ` +
-      `We’ll mirror everything privately for the referees.`,
-    allowedMentions: { users: [message.author.id] } // only ping the author
-  });
-
-  // ➕ ADD THIS LINE to DM them the thread link too
-  await dmDisputeRaiser(message, disputeThread);
-}
 
     // DEBUG: why we might be skipping
     const inDispute =
@@ -245,31 +253,35 @@ if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
     if (!inDispute) return;
     if (!mentioned) return;
 
+    // Now it's safe to compute disputeThread and use it
     const isThread =
-      message.channel.type === ChannelType.PublicThread || message.channel.type === ChannelType.PrivateThread;
+      message.channel.type === ChannelType.PublicThread ||
+      message.channel.type === ChannelType.PrivateThread;
     const disputeThread = isThread ? message.channel : null;
 
+    // Ask preset questions + greet author + DM them (run once per dispute thread)
     if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
-  // Ask preset questions (once per dispute thread)
-  await message.channel.send(
-    `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
-  );
+      await message.channel.send(
+        `Thanks for tagging <@&${REF_ROLE_ID}>.\nPlease answer the following:\n- ${PRESET_QUERIES.join('\n- ')}`
+      );
 
-  // Greet & instruct the player in the *dispute* thread (not the ref thread)
-  await message.reply({
-    content:
-      `👋 Hi <@${message.author.id}>, this is the **Gymbreakers Referee Team**.\n` +
-      `Please send any evidence and messages **here in this thread**. ` +
-      `We’ll mirror everything privately for the referees.`,
-    allowedMentions: { users: [message.author.id] } // only ping the author
-  });
-}
+      await message.reply({
+        content:
+          `👋 Hi <@${message.author.id}>, this is the **Gymbreakers Referee Team**.\n` +
+          `Please send any evidence and messages **here in this thread**. ` +
+          `We’ll mirror everything privately for the referees.`,
+        allowedMentions: { parse: [], users: [message.author.id] } // only ping author
+      });
 
+      await dmDisputeRaiser(message, disputeThread);
+    }
 
+    // Extract inputs
     const countries = await extractCountries(message);
     const opponent = extractOpponentTag(message);
     const summary = extractIssueSummary(message);
 
+    // Create or reuse ref thread
     const existingRefThreadId = disputeThread ? disputeToRefThread.get(disputeThread.id) : null;
     let refThread = existingRefThreadId
       ? await message.guild.channels.fetch(existingRefThreadId).catch(() => null)
@@ -313,6 +325,7 @@ if (disputeThread && !disputeToRefThread.has(disputeThread.id)) {
   }
 });
 
+// Mirror future messages from the same player within the dispute area
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
