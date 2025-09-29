@@ -365,6 +365,24 @@ const slashCommands = [
     .setDescription('Reopen dispute: unarchive+unlock and resume DM mirroring.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
+
+  new SlashCommandBuilder()
+  .setName('message')
+  .setDescription('DM the dispute player from this thread.')
+  .addStringOption(o =>
+    o.setName('text')
+     .setDescription('What to send')
+     .setRequired(true)
+     .setMaxLength(1800) // keep well under Discord’s 2000 char limit
+  )
+  .addBooleanOption(o =>
+    o.setName('echo')
+     .setDescription('Also echo in this thread')
+     .setRequired(false)
+  )
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+  .toJSON(),
+
 ];
 
 // Slash command logic
