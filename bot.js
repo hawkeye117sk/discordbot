@@ -22,11 +22,11 @@ if (!token || !token.includes('.')) {
 
 const {
   GUILD_ID,
-  DISPUTE_CHANNEL_ID,  // #dispute-request (text channel or forum parent)
-  REF_HUB_CHANNEL_ID,  // #dispute-referees (text channel allowing private threads)
+  DISPUTE_CHANNEL_ID,  // #dispute-request (text channel or a forum)
+  REF_HUB_CHANNEL_ID,  // #dispute-referees (text channel that allows private threads)
   REF_ROLE_ID,         // @Referee
   JR_REF_ROLE_ID,      // @Junior Referee
-  TRIGGER_ROLE_ID,     // role that must be mentioned to trigger (e.g., @Referee)
+  TRIGGER_ROLE_ID,     // role to @ to trigger the bot (e.g., @Referee)
 } = process.env;
 
 const requiredEnv = {
@@ -48,11 +48,13 @@ const PRESET_QUERIES = [
   'For Gameplay disputes, please provide full video evidence.',
 ];
 
+const ISSUES = ['Lag', 'Communication', 'Device Issue', 'No Show'];
+
 // ====== STATE ======
 const disputeToRefThread = new Map();      // disputeThreadId -> refThreadId (if forum)
 const disputeToDecisionChan = new Map();   // disputeThreadId -> decisionChannelId
-const playerToRefThread = new Map();       // userId -> refThreadId
-const refThreadToPlayer = new Map();       // refThreadId -> userId
+const playerToRefThread = new Map();       // userId -> refThreadId (mirror map)
+const refThreadMeta = new Map();           // refThreadId -> { player1Id?, player2Id?, issue? }
 const closedPlayers = new Set();           // userId => closed
 const refThreadToOrigin = new Map();       // refThreadId -> { channelId, messageId }
 
@@ -125,6 +127,34 @@ async function findDecisionChannel(guild, countryA, countryB) {
   return chans.find(c => /^post|^result/.test(c.name)) || chans.first() || null;
 }
 
+async function getUserNameMention(guild, userId) {
+  try {
+    const m = await guild.members.fetch(userId);
+    return `@${m.user.username}`;
+  } catch {
+    try {
+      const u = await client.users.fetch(userId);
+      return `@${u.username}`;
+    } catch { return '@Unknown'; }
+  }
+}
+
+async function renameThreadWithMeta(thread, meta) {
+  const p1 = meta.player1Id ? await getUserNameMention(thread.guild, meta.player1Id) : null;
+  const p2 = meta.player2Id ? await getUserNameMention(thread.guild, meta.player2Id) : null;
+
+  let name;
+  if (meta.issue && p1 && p2) name = `${meta.issue} - ${p1.replace('@','')} vs ${p2.replace('@','')}`;
+  else if (p1 && p2)          name = `Dispute - ${p1.replace('@','')} vs ${p2.replace('@','')}`;
+  else if (meta.issue)        name = `${meta.issue}`;
+  else if (p1)                name = `Dispute - ${p1.replace('@','')}`;
+  else                        name = thread.name;
+
+  if (name && name !== thread.name) {
+    try { await thread.setName(name, 'Set by bot'); } catch {}
+  }
+}
+
 async function createRefThread(guild, disputeMessage, playerCountry, oppCountry) {
   const refHub = await guild.channels.fetch(REF_HUB_CHANNEL_ID);
   if (!refHub || refHub.type !== ChannelType.GuildText) {
@@ -134,7 +164,7 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   const player = disputeMessage.author;
   const playerName = player.globalName || player.username;
   const thread = await refHub.threads.create({
-    name: `Dispute - ${playerName}`,  // requested name
+    name: `Dispute - ${playerName}`,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     type: ChannelType.PrivateThread,
     invitable: false,
@@ -144,7 +174,6 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   const jrRoleMention  = `<@&${JR_REF_ROLE_ID}>`;
   const countriesLine = `Countries: ${fmtCountry(playerCountry)} and ${fmtCountry(oppCountry)}`;
 
-  // One seed message. No user mentions.
   await thread.send(
     [
       `${refRoleMention} ${jrRoleMention}`,
@@ -189,9 +218,8 @@ async function dmDisputeRaiser(message, disputeThread) {
     link,
   ].join('\n');
 
-  try {
-    await user.send(text);
-  } catch {
+  try { await user.send(text); }
+  catch {
     try {
       await message.reply({
         content: `I couldn’t DM you (DMs disabled). Please answer here and enable DMs if possible.\n` +
@@ -204,8 +232,7 @@ async function dmDisputeRaiser(message, disputeThread) {
 
 // ====== MESSAGE HANDLERS ======
 
-// 1) Trigger from dispute area → create Dispute Thread + DM player (NO public questions).
-//    If opponent country not detected → ask to re-raise with opponent country and exit.
+// 1) Trigger from dispute area → create Dispute Thread + DM player
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
@@ -248,9 +275,13 @@ client.on(Events.MessageCreate, async (message) => {
       await removeConflictedRefs(refThread, message.guild, [playerCountry.name, opponentCountry.name].filter(Boolean));
     }
 
-    // Map player ↔ thread and remember original message for cleanup on /close
+    // Seed meta: by default set the author as Player1; Player2 to be set via /set_players
+    const meta = refThreadMeta.get(refThread.id) || {};
+    if (!meta.player1Id) meta.player1Id = message.author.id;
+    refThreadMeta.set(refThread.id, meta);
+
+    // Map for DM mirroring
     playerToRefThread.set(message.author.id, refThread.id);
-    refThreadToPlayer.set(refThread.id, message.author.id);
     closedPlayers.delete(message.author.id);
     refThreadToOrigin.set(refThread.id, { channelId: message.channel.id, messageId: message.id });
 
@@ -262,7 +293,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// 2) Mirror messages in dispute area (optional safety path)
+// 2) Mirror messages in dispute area (safety path)
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
@@ -286,7 +317,7 @@ client.on(Events.MessageCreate, async (message) => {
   } catch {}
 });
 
-// 3) Mirror player **DMs** into the Dispute Thread (silently drop when Closed)
+// 3) Mirror player **DMs** into the Dispute Thread (drop when Closed)
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.author?.bot) return;
@@ -330,47 +361,119 @@ function teamRuleText(rule) {
   }
 }
 
+// Helper: get P1/P2 mentions from meta
+async function getPlayersFromMeta(guild, meta) {
+  const p1m = meta.player1Id ? `<@${meta.player1Id}>` : '@Player1';
+  const p2m = meta.player2Id ? `<@${meta.player2Id}>` : '@Player2';
+  return { p1m, p2m };
+}
+
 const slashCommands = [
+  // --- Set players (updates thread name) ---
   new SlashCommandBuilder()
-    .setName('decision')
-    .setDescription('Post a dispute decision from the Dispute Thread.')
-    .addStringOption(o =>
-      o.setName('grant').setDescription('Rematch granted?').setRequired(true).addChoices(
-        { name: 'will be granted', value: 'will' },
-        { name: 'will NOT be granted', value: 'will not' },
-      ))
-    .addStringOption(o =>
-      o.setName('team_rule').setDescription('Team/lead rule to apply').setRequired(true).addChoices(
-        { name: 'Same teams & same lead', value: 'same_teams_same_lead' },
-        { name: 'Same lead, backline may change', value: 'same_lead_flex_back' },
-        { name: 'New teams allowed', value: 'new_teams' },
-      ))
-    .addStringOption(o => o.setName('issue').setDescription('Short issue text to insert').setRequired(true))
-    .addChannelOption(o => o.setName('channel').setDescription('Override target channel (optional)').setRequired(false))
+    .setName('set_players')
+    .setDescription('Set Player 1 and Player 2 for this Dispute Thread.')
+    .addUserOption(o => o.setName('player1').setDescription('Player 1').setRequired(true))
+    .addUserOption(o => o.setName('player2').setDescription('Player 2').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
+  // --- Set issue (updates thread name) ---
+  new SlashCommandBuilder()
+    .setName('set_issue')
+    .setDescription('Set the issue for this Dispute Thread.')
+    .addStringOption(o => o.setName('issue').setDescription('Issue')
+      .addChoices(
+        { name: 'Lag', value: 'Lag' },
+        { name: 'Communication', value: 'Communication' },
+        { name: 'Device Issue', value: 'Device Issue' },
+        { name: 'No Show', value: 'No Show' },
+      )
+      .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .toJSON(),
+
+  // --- Send a DM to player(s); echo in thread by default ---
   new SlashCommandBuilder()
     .setName('message')
-    .setDescription('DM the dispute player from this thread.')
-    .addStringOption(o =>
-      o.setName('text').setDescription('What to send').setRequired(true)
+    .setDescription('DM a player from this thread (echoed in thread).')
+    .addStringOption(o => o.setName('target').setDescription('Who to DM')
+      .addChoices(
+        { name: 'Player 1', value: 'p1' },
+        { name: 'Player 2', value: 'p2' },
+        { name: 'Both',     value: 'both' },
+      )
+      .setRequired(true))
+    .addStringOption(o => o.setName('text').setDescription('What to send').setRequired(true))
+    .addBooleanOption(o => o.setName('echo').setDescription('Echo in thread (default true)').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .toJSON(),
+
+  // --- Decision (branch per issue) ---
+  new SlashCommandBuilder()
+    .setName('decision')
+    .setDescription('Post a dispute decision to a channel.')
+    .addSubcommand(s =>
+      s.setName('lag').setDescription('Decision for Lag')
+       .addStringOption(o => o.setName('outcome').setDescription('Result')
+         .addChoices(
+           { name: 'Rematch',      value: 'rematch' },
+           { name: 'No Rematch',   value: 'no_rematch' },
+           { name: 'Win awarded',  value: 'award_win' },
+         ).setRequired(true))
+       .addStringOption(o => o.setName('winner').setDescription('Who gets the win')
+         .addChoices({ name: 'Player 1', value: 'p1' }, { name: 'Player 2', value: 'p2' }))
+       .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(false))
     )
-    .addBooleanOption(o =>
-      o.setName('echo').setDescription('Also echo in this thread').setRequired(false)
+    .addSubcommand(s =>
+      s.setName('communication').setDescription('Decision for Communication')
+       .addStringOption(o => o.setName('outcome').setDescription('Result')
+         .addChoices(
+           { name: 'Did not communicate sufficiently', value: 'insufficient' },
+           { name: 'Dispute was Invalid',              value: 'invalid' },
+         ).setRequired(true))
+       .addStringOption(o => o.setName('offender').setDescription('Who failed to communicate')
+         .addChoices({ name: 'Player 1', value: 'p1' }, { name: 'Player 2', value: 'p2' }))
+       .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(false))
+    )
+    .addSubcommand(s =>
+      s.setName('device_issue').setDescription('Decision for Device Issue')
+       .addStringOption(o => o.setName('outcome').setDescription('Result')
+         .addChoices(
+           { name: 'Rematch',      value: 'rematch' },
+           { name: 'No Rematch',   value: 'no_rematch' },
+           { name: 'Win awarded',  value: 'award_win' },
+         ).setRequired(true))
+       .addStringOption(o => o.setName('winner').setDescription('Who gets the win')
+         .addChoices({ name: 'Player 1', value: 'p1' }, { name: 'Player 2', value: 'p2' }))
+       .addStringOption(o => o.setName('culprit').setDescription('Who had the device issue')
+         .addChoices({ name: 'Player 1', value: 'p1' }, { name: 'Player 2', value: 'p2' }))
+       .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(false))
+    )
+    .addSubcommand(s =>
+      s.setName('no_show').setDescription('Decision for No Show')
+       .addStringOption(o => o.setName('outcome').setDescription('Result')
+         .addChoices(
+           { name: 'Failed to show on time', value: 'failed' },
+           { name: 'Dispute was Invalid',    value: 'invalid' },
+         ).setRequired(true))
+       .addStringOption(o => o.setName('offender').setDescription('Who failed to show')
+         .addChoices({ name: 'Player 1', value: 'p1' }, { name: 'Player 2', value: 'p2' }))
+       .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(false))
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
+  // --- Close / Reopen ---
   new SlashCommandBuilder()
     .setName('close')
-    .setDescription('Close dispute: archive+lock, stop mirroring, DM player, delete origin.')
+    .setDescription('Close: archive+lock, stop mirroring, DM players, delete origin.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('reopen')
-    .setDescription('Reopen dispute: unarchive+unlock and resume mirroring.')
+    .setDescription('Reopen: unarchive+unlock and resume mirroring.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 ];
@@ -379,62 +482,97 @@ const slashCommands = [
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === 'message') {
-    const ch = interaction.channel;
-    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
-    const userId =
-      isThread
-        ? (refThreadToPlayer.get(ch.id)
-           || [...playerToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0]
-           || null)
-        : null;
+  // Must be in a thread for most commands
+  const ch = interaction.channel;
+  const inThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
 
-    if (!isThread || !userId) {
-      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (player not found).' });
-    }
+  // --- /set_players ---
+  if (interaction.commandName === 'set_players') {
+    if (!inThread) return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
 
-    const text = interaction.options.getString('text', true);
-    const echo = interaction.options.getBoolean('echo') ?? false;
+    const p1 = interaction.options.getUser('player1', true);
+    const p2 = interaction.options.getUser('player2', true);
+    const meta = refThreadMeta.get(ch.id) || {};
+    meta.player1Id = p1.id;
+    meta.player2Id = p2.id;
+    refThreadMeta.set(ch.id, meta);
 
-    try {
-      const user = await interaction.client.users.fetch(userId);
-      await user.send(text);
+    // Map both players for DM mirroring
+    playerToRefThread.set(p1.id, ch.id);
+    playerToRefThread.set(p2.id, ch.id);
+    closedPlayers.delete(p1.id); closedPlayers.delete(p2.id);
 
-      if (echo) {
-        await ch.send(`📤 **Bot → <@${userId}> (DM):** ${text}`);
-      }
-
-      return interaction.reply({ ephemeral: true, content: '✅ Sent.' });
-    } catch (e) {
-      console.error('DM send failed:', e?.message || e);
-      return interaction.reply({ ephemeral: true, content: '❌ Could not DM the player (DMs closed or blocked).' });
-    }
+    await renameThreadWithMeta(ch, meta);
+    return interaction.reply({ ephemeral: false, content: `Players set: <@${p1.id}> vs <@${p2.id}> (thread name updated).` });
   }
 
-  if (interaction.commandName === 'close' || interaction.commandName === 'reopen') {
-    const ch = interaction.channel;
-    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
-    const userId =
-      isThread
-        ? (refThreadToPlayer.get(ch.id)
-           || [...playerToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0]
-           || null)
-        : null;
+  // --- /set_issue ---
+  if (interaction.commandName === 'set_issue') {
+    if (!inThread) return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
 
-    if (!isThread || !userId) {
-      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (player not found).' });
+    const issue = interaction.options.getString('issue', true);
+    const meta = refThreadMeta.get(ch.id) || {};
+    meta.issue = issue;
+    refThreadMeta.set(ch.id, meta);
+
+    await renameThreadWithMeta(ch, meta);
+    return interaction.reply({ ephemeral: false, content: `Issue set: **${issue}** (thread name updated).` });
+  }
+
+  // --- /message ---
+  if (interaction.commandName === 'message') {
+    if (!inThread) return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
+
+    const target = interaction.options.getString('target', true); // p1 | p2 | both
+    const text   = interaction.options.getString('text', true);
+    const echo   = interaction.options.getBoolean('echo') ?? true;
+
+    const meta = refThreadMeta.get(ch.id) || {};
+    const targets = [];
+    if (target === 'p1' && meta.player1Id) targets.push(meta.player1Id);
+    if (target === 'p2' && meta.player2Id) targets.push(meta.player2Id);
+    if (target === 'both') {
+      if (meta.player1Id) targets.push(meta.player1Id);
+      if (meta.player2Id) targets.push(meta.player2Id);
+    }
+    if (!targets.length) {
+      return interaction.reply({ ephemeral: true, content: 'Player(s) not set. Use /set_players first.' });
     }
 
+    // Try DM, then echo in thread for record
+    let sent = 0;
+    for (const uid of targets) {
+      try {
+        const u = await interaction.client.users.fetch(uid);
+        await u.send(text);
+        sent++;
+      } catch {}
+    }
+
+    if (echo) {
+      const toText = targets.map(uid => `<@${uid}>`).join(', ');
+      await ch.send(`📤 **Bot → ${toText} (DM):** ${text}`);
+    }
+
+    return interaction.reply({ ephemeral: true, content: sent ? '✅ Sent.' : '❌ Could not DM (DMs closed).' });
+  }
+
+  // --- /close & /reopen ---
+  if (interaction.commandName === 'close' || interaction.commandName === 'reopen') {
+    if (!inThread) return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
+
+    const meta = refThreadMeta.get(ch.id) || {};
+    const ids = [meta.player1Id, meta.player2Id].filter(Boolean);
+
     if (interaction.commandName === 'close') {
-      closedPlayers.add(userId);
+      ids.forEach(id => closedPlayers.add(id));
       try { await ch.setArchived(true, 'Closed by /close'); } catch {}
       try { await ch.setLocked(true, 'Closed by /close'); } catch {}
-
-      try {
-        const user = await client.users.fetch(userId).catch(() => null);
-        if (user) await user.send('Your dispute has been **Closed**. Your DMs to this bot will not be forwarded.');
-      } catch {}
-
+      // DM both players
+      for (const uid of ids) {
+        try { const u = await client.users.fetch(uid); await u.send('Your dispute has been **Closed**. Your DMs to this bot will not be forwarded.'); } catch {}
+      }
+      // Delete origin
       try {
         const origin = refThreadToOrigin.get(ch.id);
         if (origin?.channelId && origin?.messageId) {
@@ -445,58 +583,137 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         }
       } catch {}
-
-      return interaction.reply({ ephemeral: true, content: 'Dispute **Closed**: thread archived & locked, player notified, origin deleted (if allowed).' });
+      return interaction.reply({ ephemeral: false, content: '🔒 Dispute **Closed**.' });
+    } else {
+      ids.forEach(id => closedPlayers.delete(id));
+      try { await ch.setArchived(false, 'Reopened by /reopen'); } catch {}
+      try { await ch.setLocked(false, 'Reopened by /reopen'); } catch {}
+      return interaction.reply({ ephemeral: false, content: '🔓 Dispute **Reopened**. DM mirroring resumed.' });
     }
-
-    // /reopen
-    closedPlayers.delete(userId);
-    try { await ch.setArchived(false, 'Reopened by /reopen'); } catch {}
-    try { await ch.setLocked(false, 'Reopened by /reopen'); } catch {}
-    return interaction.reply({ ephemeral: true, content: 'Dispute **Reopened**: DM mirroring resumed.' });
   }
 
+  // --- /decision (branch per issue) ---
   if (interaction.commandName === 'decision') {
-    try {
-      const current = interaction.channel;
-      if (current?.type !== ChannelType.PrivateThread && current?.type !== ChannelType.PublicThread) {
-        return interaction.reply({ ephemeral: true, content: 'Use this command from within the Dispute Thread (or specify a channel).' });
-      }
+    if (!inThread) return interaction.reply({ ephemeral: true, content: 'Use this in the Dispute Thread.' });
 
-      const disputeThreadId = [...disputeToRefThread.entries()].find(([, refId]) => refId === current.id)?.[0] || null;
+    const meta = refThreadMeta.get(ch.id) || {};
+    const { p1m, p2m } = await getPlayersFromMeta(interaction.guild, meta);
+    const sub = interaction.options.getSubcommand(true);
 
-      const grant = interaction.options.getString('grant', true);
-      const rule  = interaction.options.getString('team_rule', true);
-      const issue = interaction.options.getString('issue', true);
-      const overrideChan = interaction.options.getChannel('channel', false);
-
-      let targetChannel = overrideChan;
-      if (!targetChannel) {
-        const auto = disputeThreadId ? disputeToDecisionChan.get(disputeThreadId) : null;
-        targetChannel = auto ? await interaction.guild.channels.fetch(auto).catch(() => null) : null;
-      }
-      if (!targetChannel) {
-        return interaction.reply({ ephemeral: true, content: 'No target channel found. Provide one with /decision channel:...' });
-      }
-
-      const teamRuleLines = teamRuleText(rule);
-      const body = [
-        'Post: (countries not detected)', // can be improved later to parse from thread name
-        '',
-        '@Playername1 @Playername2',
-        `After reviewing the match dispute set by <@${interaction.user.id}> regarding ${issue}. The Referees team has decided that a rematch **${grant}** be granted.`,
-        '',
-        ...teamRuleLines,
-        '',
-        'We would like to remind all parties involved that referees and staff members from countries involved in disputes cannot be involved in the resolution of the dispute.'
-      ].join('\n');
-
-      await targetChannel.send(body);
-      await interaction.reply({ ephemeral: true, content: `Posted decision to <#${targetChannel.id}>.` });
-    } catch (e) {
-      console.error(e);
-      try { await interaction.reply({ ephemeral: true, content: 'Failed to post decision. Check my permissions and try again.' }); } catch {}
+    // Where to post
+    const overrideChan = interaction.options.getChannel('channel', false);
+    let targetChannel = overrideChan;
+    if (!targetChannel) {
+      // best-effort: post in current thread’s detected decision channel if mapped
+      const disputeThreadId = [...disputeToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0] || null;
+      const auto = disputeThreadId ? disputeToDecisionChan.get(disputeThreadId) : null;
+      targetChannel = auto ? await interaction.guild.channels.fetch(auto).catch(() => null) : null;
     }
+    if (!targetChannel || !targetChannel.isTextBased?.()) {
+      targetChannel = ch; // fallback to post in the thread itself
+    }
+
+    let body = '';
+    if (sub === 'lag') {
+      const outcome = interaction.options.getString('outcome', true); // rematch | no_rematch | award_win
+      const winner  = interaction.options.getString('winner', false);  // p1 | p2
+      const winnerM = winner === 'p2' ? p2m : p1m;
+
+      if (outcome === 'rematch') {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Lag** dispute, the Referees team has decided: **Rematch will be granted**.`,
+        ].join('\n');
+      } else if (outcome === 'no_rematch') {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Lag** dispute, the Referees team has decided: **No rematch will be granted**.`,
+        ].join('\n');
+      } else { // award_win
+        if (!winner) return interaction.reply({ ephemeral: true, content: 'Pick a winner for "Win awarded".' });
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Lag** dispute, the Referees team has decided: **Win awarded to ${winnerM}**.`,
+        ].join('\n');
+      }
+    }
+
+    if (sub === 'communication') {
+      const outcome = interaction.options.getString('outcome', true); // insufficient | invalid
+      const offender = interaction.options.getString('offender', false); // p1 | p2
+      const offenderM = offender === 'p2' ? p2m : p1m;
+
+      if (outcome === 'insufficient') {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Communication** dispute, the Referees team has decided:`,
+          offender ? `**${offenderM} did not communicate sufficiently.**` : `**A party did not communicate sufficiently.**`,
+        ].join('\n');
+      } else {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Communication** dispute, the Referees team has decided: **The dispute was invalid.**`,
+        ].join('\n');
+      }
+    }
+
+    if (sub === 'device_issue') {
+      const outcome = interaction.options.getString('outcome', true); // rematch | no_rematch | award_win
+      const winner  = interaction.options.getString('winner', false);  // p1 | p2
+      const culprit = interaction.options.getString('culprit', false); // p1 | p2
+      const winnerM = winner === 'p2' ? p2m : p1m;
+      const culpritM = culprit === 'p2' ? p2m : p1m;
+
+      if (!culprit) {
+        return interaction.reply({ ephemeral: true, content: 'Specify who had the device issue (culprit).' });
+      }
+
+      if (outcome === 'rematch') {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Device Issue** dispute, the Referees team has decided: **Rematch will be granted**.`,
+          `Additionally, a **warning** is issued to ${culpritM} regarding device reliability.`,
+        ].join('\n');
+      } else if (outcome === 'no_rematch') {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Device Issue** dispute, the Referees team has decided: **No rematch will be granted**.`,
+          `Additionally, a **warning** is issued to ${culpritM} regarding device reliability.`,
+        ].join('\n');
+      } else { // award_win
+        if (!winner) return interaction.reply({ ephemeral: true, content: 'Pick a winner for "Win awarded".' });
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **Device Issue** dispute, the Referees team has decided: **Win awarded to ${winnerM}**.`,
+          `Additionally, a **warning** is issued to ${culpritM} regarding device reliability.`,
+        ].join('\n');
+      }
+    }
+
+    if (sub === 'no_show') {
+      const outcome = interaction.options.getString('outcome', true); // failed | invalid
+      const offender = interaction.options.getString('offender', false); // p1 | p2
+      const offenderM = offender === 'p2' ? p2m : p1m;
+
+      if (outcome === 'failed') {
+        if (!offender) return interaction.reply({ ephemeral: true, content: 'Pick who failed to show.' });
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **No Show** dispute, the Referees team has decided:`,
+          `**${offenderM} failed to show on time.**`,
+        ].join('\n');
+      } else {
+        body = [
+          `${p1m} ${p2m}`,
+          `After reviewing a **No Show** dispute, the Referees team has decided: **The dispute was invalid.**`,
+        ].join('\n');
+      }
+    }
+
+    if (!body) return interaction.reply({ ephemeral: true, content: 'Nothing to post (check options).' });
+
+    await targetChannel.send(body);
+    return interaction.reply({ ephemeral: true, content: `✅ Posted to ${targetChannel.id === ch.id ? 'this thread' : `<#${targetChannel.id}>`}.` });
   }
 });
 
