@@ -22,12 +22,11 @@ if (!token || !token.includes('.')) {
 
 const {
   GUILD_ID,
-  DISPUTE_CHANNEL_ID,
-  REF_HUB_CHANNEL_ID,
-  REF_ROLE_ID,
-  JR_REF_ROLE_ID,
-  TRIGGER_ROLE_ID,
-  // COUNTRY_ROLE_PREFIX is no longer used; bracket roles are used instead
+  DISPUTE_CHANNEL_ID,  // #dispute-request (text channel or forum parent)
+  REF_HUB_CHANNEL_ID,  // #dispute-referees (text channel allowing private threads)
+  REF_ROLE_ID,         // @Referee
+  JR_REF_ROLE_ID,      // @Junior Referee
+  TRIGGER_ROLE_ID,     // role that must be mentioned to trigger (e.g., @Referee)
 } = process.env;
 
 const requiredEnv = {
@@ -70,20 +69,20 @@ const client = new Client({
 });
 
 // ====== UTILS ======
-const BRACKET_ROLE = /\[.+\]/; // any role whose name contains [ ... ]
-
+const BRACKET_ROLE = /\[.+\]/; // role names containing [..], e.g., "New Delhi (India) [ND]"
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
 function messageMentionsRole(message, roleId) {
-  return message.mentions.roles.has(roleId) || message.content.includes(`<@&${roleId}>`);
+  return message.mentions.roles.has(roleId) || (message.content || '').includes(`<@&${roleId}>`);
 }
 
-// Country from a member's roles → first role whose name contains [ ]
+// Member's "country" = first role with [ ]
 function getMemberCountry(member) {
   const role = member.roles.cache.find(r => BRACKET_ROLE.test(r.name));
   return role ? { name: role.name, roleId: role.id } : { name: null, roleId: null };
 }
 
-// Opponent country from the message → prefer role mentions with [ ], else text match, else forum tag with [ ]
+// Opponent country: prefer mentioned roles with [ ], else text match, else forum tag with [ ]
 function getOpponentCountryFromMessage(message, excludeName) {
   for (const role of message.mentions.roles.values()) {
     if (BRACKET_ROLE.test(role.name)) {
@@ -115,10 +114,8 @@ function getOpponentCountryFromMessage(message, excludeName) {
   return { name: null, roleId: null };
 }
 
-// Render as a role mention if we have the roleId; else plain name
 const fmtCountry = (c) => c?.roleId ? `<@&${c.roleId}>` : (c?.name || 'Unknown');
 
-// Find result channel that contains both country slugs (best effort)
 async function findDecisionChannel(guild, countryA, countryB) {
   if (!countryA || !countryB) return null;
   const a = slug(countryA), b = slug(countryB);
@@ -128,7 +125,6 @@ async function findDecisionChannel(guild, countryA, countryB) {
   return chans.find(c => /^post|^result/.test(c.name)) || chans.first() || null;
 }
 
-// Create the Dispute Thread (private for refs) and seed with ONE message
 async function createRefThread(guild, disputeMessage, playerCountry, oppCountry) {
   const refHub = await guild.channels.fetch(REF_HUB_CHANNEL_ID);
   if (!refHub || refHub.type !== ChannelType.GuildText) {
@@ -138,7 +134,7 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   const player = disputeMessage.author;
   const playerName = player.globalName || player.username;
   const thread = await refHub.threads.create({
-    name: `Dispute - ${playerName}`,
+    name: `Dispute - ${playerName}`,  // requested name
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     type: ChannelType.PrivateThread,
     invitable: false,
@@ -148,6 +144,7 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   const jrRoleMention  = `<@&${JR_REF_ROLE_ID}>`;
   const countriesLine = `Countries: ${fmtCountry(playerCountry)} and ${fmtCountry(oppCountry)}`;
 
+  // One seed message. No user mentions.
   await thread.send(
     [
       `${refRoleMention} ${jrRoleMention}`,
@@ -160,7 +157,6 @@ async function createRefThread(guild, disputeMessage, playerCountry, oppCountry)
   return thread;
 }
 
-// Remove conflicted refs: any ref who has a bracketed role that matches either country name
 async function removeConflictedRefs(thread, guild, countryNames) {
   const names = countryNames.filter(Boolean).map(n => n.toLowerCase());
   if (!names.length) return;
@@ -175,7 +171,6 @@ async function removeConflictedRefs(thread, guild, countryNames) {
   }
 }
 
-// --- DM helper: send questions (no “Dispute Review” line) ---
 async function dmDisputeRaiser(message, disputeThread) {
   const user = message.author;
   const name = user.globalName || user.username;
@@ -190,7 +185,7 @@ async function dmDisputeRaiser(message, disputeThread) {
     '**Questions to answer:**',
     ...PRESET_QUERIES.map(q => `• ${q}`),
     '',
-    `Reference link to your dispute:`,
+    'Reference link to your dispute:',
     link,
   ].join('\n');
 
@@ -221,26 +216,27 @@ client.on(Events.MessageCreate, async (message) => {
     const mentioned = messageMentionsRole(message, TRIGGER_ROLE_ID);
     if (!inDispute || !mentioned) return;
 
-    // Player/opponent countries
+    // Countries
     const member = await message.guild.members.fetch(message.author.id);
     const playerCountry = getMemberCountry(member);
     const opponentCountry = getOpponentCountryFromMessage(message, playerCountry.name);
 
-    // 🔒 Require an opponent country
+    // Require opponent country
     if (!opponentCountry.name) {
       await message.reply({
-        content: 'I couldn’t detect an **opponent country**. Please **re-raise the issue and tag the opponent country role** (e.g., a role whose name includes `[XX]`).',
+        content: 'I couldn’t detect an **opponent country**. Please **re-raise the issue and tag the opponent country role** (a role whose name includes `[XX]`).',
         allowedMentions: { parse: [] }
       });
       return;
     }
 
-    // Create/use thread
+    // Determine if this came from a forum thread
     const isForumThread =
       message.channel.type === ChannelType.PublicThread ||
       message.channel.type === ChannelType.PrivateThread;
     const disputeThread = isForumThread ? message.channel : null;
 
+    // Create/use the Dispute Thread
     let refThread = disputeThread ? await message.guild.channels.fetch(disputeToRefThread.get(disputeThread.id)).catch(() => null) : null;
     if (!refThread) {
       refThread = await createRefThread(message.guild, message, playerCountry, opponentCountry);
@@ -252,13 +248,13 @@ client.on(Events.MessageCreate, async (message) => {
       await removeConflictedRefs(refThread, message.guild, [playerCountry.name, opponentCountry.name].filter(Boolean));
     }
 
-    // Map player ↔ thread and remember original message (for deletion on /close)
+    // Map player ↔ thread and remember original message for cleanup on /close
     playerToRefThread.set(message.author.id, refThread.id);
     refThreadToPlayer.set(refThread.id, message.author.id);
     closedPlayers.delete(message.author.id);
     refThreadToOrigin.set(refThread.id, { channelId: message.channel.id, messageId: message.id });
 
-    // DM the player (no public message)
+    // DM the player (no public questions)
     await dmDisputeRaiser(message, disputeThread);
 
   } catch (err) {
@@ -355,39 +351,65 @@ const slashCommands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName('message')
+    .setDescription('DM the dispute player from this thread.')
+    .addStringOption(o =>
+      o.setName('text').setDescription('What to send').setRequired(true)
+    )
+    .addBooleanOption(o =>
+      o.setName('echo').setDescription('Also echo in this thread').setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName('close')
-    .setDescription('Close dispute: archive+lock, stop mirroring, DM player, delete original message.')
+    .setDescription('Close dispute: archive+lock, stop mirroring, DM player, delete origin.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('reopen')
-    .setDescription('Reopen dispute: unarchive+unlock and resume DM mirroring.')
+    .setDescription('Reopen dispute: unarchive+unlock and resume mirroring.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
-
-  new SlashCommandBuilder()
-  .setName('message')
-  .setDescription('DM the dispute player from this thread.')
-  .addStringOption(o =>
-    o.setName('text')
-     .setDescription('What to send')
-     .setRequired(true)
-     .setMaxLength(1800) // keep well under Discord’s 2000 char limit
-  )
-  .addBooleanOption(o =>
-    o.setName('echo')
-     .setDescription('Also echo in this thread')
-     .setRequired(false)
-  )
-  .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-  .toJSON(),
-
 ];
 
 // Slash command logic
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'message') {
+    const ch = interaction.channel;
+    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
+    const userId =
+      isThread
+        ? (refThreadToPlayer.get(ch.id)
+           || [...playerToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0]
+           || null)
+        : null;
+
+    if (!isThread || !userId) {
+      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (player not found).' });
+    }
+
+    const text = interaction.options.getString('text', true);
+    const echo = interaction.options.getBoolean('echo') ?? false;
+
+    try {
+      const user = await interaction.client.users.fetch(userId);
+      await user.send(text);
+
+      if (echo) {
+        await ch.send(`📤 **Bot → <@${userId}> (DM):** ${text}`);
+      }
+
+      return interaction.reply({ ephemeral: true, content: '✅ Sent.' });
+    } catch (e) {
+      console.error('DM send failed:', e?.message || e);
+      return interaction.reply({ ephemeral: true, content: '❌ Could not DM the player (DMs closed or blocked).' });
+    }
+  }
 
   if (interaction.commandName === 'close' || interaction.commandName === 'reopen') {
     const ch = interaction.channel;
@@ -400,7 +422,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         : null;
 
     if (!isThread || !userId) {
-      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (couldn’t resolve the player).' });
+      return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread (player not found).' });
     }
 
     if (interaction.commandName === 'close') {
@@ -417,17 +439,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const origin = refThreadToOrigin.get(ch.id);
         if (origin?.channelId && origin?.messageId) {
           const oChan = await client.channels.fetch(origin.channelId).catch(() => null);
-          if (oChan && oChan.isTextBased?.()) {
+          if (oChan && typeof oChan.isTextBased === 'function' && oChan.isTextBased()) {
             const msg = await oChan.messages.fetch(origin.messageId).catch(() => null);
             if (msg && msg.deletable) await msg.delete().catch(() => {});
           }
         }
       } catch {}
 
-      return interaction.reply({ ephemeral: true, content: 'Dispute **Closed**: thread archived & locked, player notified, original message deleted (if permitted).' });
+      return interaction.reply({ ephemeral: true, content: 'Dispute **Closed**: thread archived & locked, player notified, origin deleted (if allowed).' });
     }
 
-    // reopen
+    // /reopen
     closedPlayers.delete(userId);
     try { await ch.setArchived(false, 'Reopened by /reopen'); } catch {}
     try { await ch.setLocked(false, 'Reopened by /reopen'); } catch {}
@@ -459,7 +481,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const teamRuleLines = teamRuleText(rule);
       const body = [
-        'Post: (countries not detected)', // simple header; can be improved to parse thread name
+        'Post: (countries not detected)', // can be improved later to parse from thread name
         '',
         '@Playername1 @Playername2',
         `After reviewing the match dispute set by <@${interaction.user.id}> regarding ${issue}. The Referees team has decided that a rematch **${grant}** be granted.`,
