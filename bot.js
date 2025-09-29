@@ -19,21 +19,20 @@ const {
   COUNTRY_ROLE_PREFIX = 'Country: '
 } = process.env;
 
-const debugKeys = Object.keys(process.env)
+const dbg = Object.keys(process.env)
   .filter(k => k.startsWith('DISCORD') || k.startsWith('RAILWAY') || k === 'NODE_VERSION')
   .sort();
-console.log('ENV KEYS SEEN:', debugKeys);
+console.log('ENV KEYS SEEN:', dbg);
 console.log('DISCORD_TOKEN length:', token ? token.length : 0);
 
 if (!token || !token.includes('.')) {
   console.error('❌ DISCORD_TOKEN missing/invalid. Set it in Railway → Service → Variables.');
   process.exit(1);
 }
-const requiredEnv = {
+for (const [k, v] of Object.entries({
   GUILD_ID, DISPUTE_CHANNEL_ID, REF_HUB_CHANNEL_ID,
   REF_ROLE_ID, JR_REF_ROLE_ID, TRIGGER_ROLE_ID
-};
-for (const [k, v] of Object.entries(requiredEnv)) {
+})) {
   if (!v) {
     console.error(`❌ Missing required env var: ${k}`);
     process.exit(1);
@@ -49,12 +48,14 @@ const PRESET_QUERIES = [
 ];
 
 // ====== STATE ======
-const disputeToRefThread = new Map();    // disputeThreadId -> refThreadId
-const disputeToDecisionChan = new Map(); // disputeThreadId -> decisionChannelId
-const playerToRefThread = new Map();     // userId -> refThreadId
-const refThreadToPlayer = new Map();     // refThreadId -> userId (dispute raiser)
-const refThreadToOrigin = new Map();     // refThreadId -> {channelId, messageId}
-const closedPlayers = new Set();         // userIds whose DM mirror is paused
+const disputeToRefThread   = new Map(); // disputeThreadId -> refThreadId
+const disputeToDecisionChan= new Map(); // disputeThreadId -> decisionChannelId
+const playerToRefThread    = new Map(); // userId -> refThreadId (raiser)
+const refThreadToPlayer    = new Map(); // refThreadId -> userId (raiser)
+const refThreadToOrigin    = new Map(); // refThreadId -> {channelId,messageId}
+const closedPlayers        = new Set(); // userIds with paused DM mirror
+const refThreadPlayers     = new Map(); // refThreadId -> {p1Id,p2Id}
+const refThreadIssue       = new Map(); // refThreadId -> 'lag'|'communication'|'device_issue'|'no_show'
 
 // ====== CLIENT ======
 const client = new Client({
@@ -76,16 +77,27 @@ function messageMentionsRole(message, roleId) {
   return message.mentions.roles.has(roleId) || message.content.includes(`<@&${roleId}>`);
 }
 
+function displayName(user) {
+  return user?.globalName || user?.username || 'Player';
+}
+const ISSUE_TITLES = {
+  lag: 'Lag',
+  communication: 'Communication',
+  device_issue: 'Device Issue',
+  no_show: 'No Show',
+  wrong_pokemon_moveset: 'Wrong Pokémon / Moveset',
+};
+
+function issueToTitle(issue) {
+  return ISSUE_TITLES[issue] || 'Dispute';
+}
+
 // Find first role on a member that looks like a country tag, prefer `[XX]` style
 function getMemberCountry(member) {
-  // 1) role with [..]
   const bracket = member.roles.cache.find(r => hasBrackets(r.name));
   if (bracket) return { id: bracket.id, name: bracket.name };
-
-  // 2) role name starting with configured prefix
   const pref = member.roles.cache.find(r => r.name.startsWith(COUNTRY_ROLE_PREFIX));
   if (pref) return { id: pref.id, name: pref.name.slice(COUNTRY_ROLE_PREFIX.length) };
-
   return { id: null, name: null };
 }
 
@@ -109,6 +121,21 @@ async function findDecisionChannel(guild, countryA, countryB) {
   return chans.find((c) => /^post|^result/.test(c.name)) || chans.first() || null;
 }
 
+async function renameThreadForContext(thread) {
+  if (!thread) return;
+  const players = refThreadPlayers.get(thread.id) || {};
+  const issue   = refThreadIssue.get(thread.id) || null;
+
+  const p1Name = players.p1Name || 'Player1';
+  const p2Name = players.p2Name || 'Player2';
+
+  const base = issue ? `${issueToTitle(issue)} – ${p1Name} vs ${p2Name}`
+                     : `Dispute – ${p1Name} vs ${p2Name}`;
+  if (thread.name !== base) {
+    await thread.setName(base).catch(() => {});
+  }
+}
+
 async function createRefThread(guild, disputeMessage, playerCountry, opponentCountry) {
   const refHub = await guild.channels.fetch(REF_HUB_CHANNEL_ID);
   if (!refHub || refHub.type !== ChannelType.GuildText) {
@@ -116,11 +143,9 @@ async function createRefThread(guild, disputeMessage, playerCountry, opponentCou
   }
 
   const player = disputeMessage.author;
-  const playerName = player.globalName || player.username;
-  const threadName = `Dispute – ${playerName}`;
-
+  const playerName = displayName(player);
   const thread = await refHub.threads.create({
-    name: threadName,
+    name: `Dispute – ${playerName}`,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     type: ChannelType.PrivateThread,
     invitable: false,
@@ -129,18 +154,20 @@ async function createRefThread(guild, disputeMessage, playerCountry, opponentCou
   const refRoleMention = `<@&${REF_ROLE_ID}>`;
   const jrRoleMention  = `<@&${JR_REF_ROLE_ID}>`;
   const countriesLine = [
-    playerCountry?.name ? playerCountry.name : '(player country not found)',
-    opponentCountry?.name ? opponentCountry.name : '(opponent country not found)'
+    playerCountry?.name || '(player country not found)',
+    opponentCountry?.name || '(opponent country not found)'
   ].join(' vs ');
 
-  await thread.send(
-    [
-      `${refRoleMention} ${jrRoleMention}`,
-      `Dispute Thread for **${playerName}**.`,
-      `Countries: ${countriesLine}`,
-      `Source: <#${DISPUTE_CHANNEL_ID}>`,
-    ].join('\n')
-  );
+  await thread.send([
+    `${refRoleMention} ${jrRoleMention}`,
+    `**Dispute Thread for ${playerName}.**`,
+    `**Countries:** ${countriesLine}`,
+    `**Source:** <#${DISPUTE_CHANNEL_ID}>`,
+    '',
+    '— **Referee quick-start** —',
+    '• Use `/set_issue` to set the issue (Lag, Communication, Device Issue, No Show).',
+    '• Use `/set_players` to set Player 1 and Player 2. The thread title will update automatically.'
+  ].join('\n'));
 
   return thread;
 }
@@ -148,7 +175,7 @@ async function createRefThread(guild, disputeMessage, playerCountry, opponentCou
 // --- DM helper: send the player the questions and tell them to use DM ---
 async function dmDisputeRaiser(message, disputeThread) {
   const user = message.author;
-  const name = user.globalName || user.username;
+  const name = displayName(user);
   const link = disputeThread
     ? `https://discord.com/channels/${message.guild.id}/${disputeThread.id}`
     : message.url;
@@ -195,6 +222,31 @@ async function inferPlayersFromDisputeThread(guild, disputeThreadId) {
   }
 }
 
+function mention(u) { return u ? `<@${u.id}>` : '@Player'; }
+function formatReminderFooter() {
+  return [
+    '',
+    'We would like to remind all parties involved that referees and staff members from countries involved in disputes cannot be involved in the resolution of the dispute.',
+    '',
+    'Good luck in your remaining battles.'
+  ].join('\n');
+}
+
+async function resolveTargetChannel(interaction, disputeThreadId) {
+  const override = interaction.options.getChannel('channel');
+  if (override?.type === ChannelType.GuildText) return override;
+
+  if (disputeThreadId) {
+    const autoId = disputeToDecisionChan.get(disputeThreadId);
+    if (autoId) {
+      const c = await interaction.guild.channels.fetch(autoId).catch(() => null);
+      if (c) return c;
+    }
+  }
+  if (interaction.channel?.type === ChannelType.GuildText) return interaction.channel;
+  return null;
+}
+
 // ====== MESSAGE HANDLERS ======
 
 // 1) Trigger from dispute area → create Dispute Thread + DM player (NO public questions).
@@ -212,7 +264,6 @@ client.on(Events.MessageCreate, async (message) => {
     const playerCountry   = getMemberCountry(member);
     const opponentCountry = getOpponentCountryFromMessage(message, playerCountry.name);
 
-    // Require an opponent country role mention (with [..])
     if (!opponentCountry.name) {
       await message.reply({
         content: 'I couldn’t detect an **opponent country**. Please **re-raise and tag the opponent country role** (a role with `[ ]`).',
@@ -221,13 +272,11 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Link to a dispute thread if already in one, else null
     const isThread = message.channel.isThread?.() || (
       message.channel.type === ChannelType.PublicThread || message.channel.type === ChannelType.PrivateThread
     );
     const disputeThread = isThread ? message.channel : null;
 
-    // Create or reuse ref/dispute thread
     let refThread = disputeThread ? await message.guild.channels.fetch(disputeToRefThread.get(disputeThread.id)).catch(() => null) : null;
     if (!refThread) {
       refThread = await createRefThread(message.guild, message, playerCountry, opponentCountry);
@@ -240,13 +289,12 @@ client.on(Events.MessageCreate, async (message) => {
       }
     }
 
-    // Map player ↔ thread and remember original message (for potential cleanups later)
+    // map & context
     playerToRefThread.set(message.author.id, refThread.id);
     refThreadToPlayer.set(refThread.id, message.author.id);
     refThreadToOrigin.set(refThread.id, { channelId: message.channel.id, messageId: message.id });
     closedPlayers.delete(message.author.id);
 
-    // Seed context in the ref thread
     const summary = (message.content || '').trim().split('\n')[0]?.slice(0, 300);
     await refThread.send(
       [
@@ -257,7 +305,6 @@ client.on(Events.MessageCreate, async (message) => {
       ].filter(Boolean).join('\n')
     );
 
-    // DM the player (no public questions)
     await dmDisputeRaiser(message, disputeThread);
   } catch (err) {
     console.error('Dispute trigger handler error:', err);
@@ -324,13 +371,34 @@ client.on(Events.MessageCreate, async (message) => {
 
 // ====== SLASH COMMANDS ======
 
-// Build /decision with two no-show variants (regular and last 24h)
+// /set_players
+const setPlayersCmd = new SlashCommandBuilder()
+  .setName('set_players')
+  .setDescription('Set Player 1 and Player 2 for this dispute thread')
+  .addUserOption(o => o.setName('player1').setDescription('Player 1').setRequired(true))
+  .addUserOption(o => o.setName('player2').setDescription('Player 2').setRequired(true))
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages);
+
+// /set_issue
+const setIssueCmd = new SlashCommandBuilder()
+  .setName('set_issue')
+  .setDescription('Set the issue for this dispute thread (updates title)')
+  .addStringOption(o => o.setName('issue').setDescription('Select issue').setRequired(true).addChoices(
+    { name: 'Lag', value: 'lag' },
+    { name: 'Communication', value: 'communication' },
+    { name: 'Device Issue', value: 'device_issue' },
+    { name: 'No Show', value: 'no_show' },
+    { name: 'Wrong Pokémon / Moveset', value: 'wrong_pokemon_moveset' }
+  ))
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages);
+
+// /decision with two no-show variants
 const decisionCmd = new SlashCommandBuilder()
   .setName('decision')
   .setDescription('Dispute decisions')
   .addSubcommand(sc =>
     sc.setName('no_show')
-      .setDescription('No show decision')
+      .setDescription('No show decision (6.2.4 → 1 pt)')
       .addStringOption(o => o.setName('culprit')
         .setDescription('Who failed to show')
         .setRequired(true)
@@ -343,7 +411,7 @@ const decisionCmd = new SlashCommandBuilder()
       .addChannelOption(o => o.setName('channel').setDescription('Override target channel')))
   .addSubcommand(sc =>
     sc.setName('no_show_24h')
-      .setDescription('No show decision (last 24h)')
+      .setDescription('No show decision (6.2.5 → 3 pts)')
       .addStringOption(o => o.setName('culprit')
         .setDescription('Who failed to show')
         .setRequired(true)
@@ -356,91 +424,95 @@ const decisionCmd = new SlashCommandBuilder()
       .addChannelOption(o => o.setName('channel').setDescription('Override target channel')))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages);
 
-// Collect and register
-const slashCommands = [decisionCmd.toJSON()];
-
-// ====== DECISION HELPERS ======
-function formatReminderFooter() {
-  return [
-    '',
-    'We would like to remind all parties involved that referees and staff members from countries involved in disputes cannot be involved in the resolution of the dispute.',
-    '',
-    'Good luck in your remaining battles.'
-  ].join('\n');
-}
-
-async function resolveTargetChannel(interaction, disputeThreadId) {
-  // If user provided override
-  const override = interaction.options.getChannel('channel');
-  if (override?.type === ChannelType.GuildText) return override;
-
-  // Try known per-dispute default channel
-  if (disputeThreadId) {
-    const autoId = disputeToDecisionChan.get(disputeThreadId);
-    if (autoId) {
-      const c = await interaction.guild.channels.fetch(autoId).catch(() => null);
-      if (c) return c;
-    }
-  }
-  // Fallback to current channel (if text) or deny
-  if (interaction.channel?.type === ChannelType.GuildText) return interaction.channel;
-  return null;
-}
-
-function mention(u) { return u ? `<@${u.id}>` : '@Player'; }
+const slashCommands = [setPlayersCmd.toJSON(), setIssueCmd.toJSON(), decisionCmd.toJSON()];
 
 // ====== INTERACTIONS ======
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // ===== /decision =====
+  // --- /set_players ---
+  if (interaction.commandName === 'set_players') {
+    const ch = interaction.channel;
+    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
+    if (!isThread) return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
+
+    const p1 = interaction.options.getUser('player1', true);
+    const p2 = interaction.options.getUser('player2', true);
+
+    refThreadPlayers.set(ch.id, { p1Id: p1.id, p2Id: p2.id, p1Name: displayName(p1), p2Name: displayName(p2) });
+    await renameThreadForContext(ch);
+
+    await ch.send(`👥 Players set: **${displayName(p1)}** vs **${displayName(p2)}**`);
+    return interaction.reply({ ephemeral: true, content: '✅ Players saved.' });
+  }
+
+  // --- /set_issue ---
+  if (interaction.commandName === 'set_issue') {
+    const ch = interaction.channel;
+    const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
+    if (!isThread) return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
+
+    const issue = interaction.options.getString('issue', true); // lag|communication|device_issue|no_show
+    refThreadIssue.set(ch.id, issue);
+    await renameThreadForContext(ch);
+
+    await ch.send(`🏷️ Issue set to **${issueToTitle(issue)}**.`);
+    return interaction.reply({ ephemeral: true, content: '✅ Issue saved.' });
+  }
+
+  // --- /decision ---
   if (interaction.commandName === 'decision') {
     const sub = interaction.options.getSubcommand();
     try {
-      // Must be used from within a ref/dispute thread to auto-link data
       const ch = interaction.channel;
       const isThread = ch && (ch.type === ChannelType.PrivateThread || ch.type === ChannelType.PublicThread);
       if (!isThread) {
         return interaction.reply({ ephemeral: true, content: 'Use this inside a Dispute Thread.' });
       }
 
-      // Find linked dispute thread
+      // Find linked dispute thread (for auto-target channel + inferring players)
       const disputeThreadId = [...disputeToRefThread.entries()].find(([, refId]) => refId === ch.id)?.[0] || null;
 
-      // Resolve players: from options if provided, else infer from dispute thread
-      let p1 = interaction.options.getUser('player1') || null;
-      let p2 = interaction.options.getUser('player2') || null;
-      if ((!p1 || !p2) && disputeThreadId) {
+      // Resolve players: prefer explicit set_players, else options, else infer
+      let p1User = null, p2User = null;
+      const stored = refThreadPlayers.get(ch.id);
+      if (stored?.p1Id && stored?.p2Id) {
+        p1User = await interaction.client.users.fetch(stored.p1Id).catch(() => null);
+        p2User = await interaction.client.users.fetch(stored.p2Id).catch(() => null);
+      }
+      p1User = p1User || interaction.options.getUser('player1') || null;
+      p2User = p2User || interaction.options.getUser('player2') || null;
+
+      if ((!p1User || !p2User) && disputeThreadId) {
         const inferred = await inferPlayersFromDisputeThread(interaction.guild, disputeThreadId);
-        p1 = p1 || inferred.p1;
-        p2 = p2 || inferred.p2;
+        p1User = p1User || inferred.p1;
+        p2User = p2User || inferred.p2;
       }
 
-      // Reporter (dispute raiser) if known
       const reporterId = refThreadToPlayer.get(ch.id) || interaction.user.id;
-
       const culprit = interaction.options.getString('culprit', true); // 'p1' | 'p2'
-      const culpritUser = culprit === 'p1' ? p1 : p2;
+      const culpritUser = culprit === 'p1' ? p1User : p2User;
 
       const targetChannel = await resolveTargetChannel(interaction, disputeThreadId);
       if (!targetChannel) {
         return interaction.reply({ ephemeral: true, content: 'No target channel found. Provide one with the channel option.' });
       }
 
-      // Compose bodies
       let body = '';
       if (sub === 'no_show') {
+        // 6.2.4 — 1 point
         body = [
-          `${mention(p1)} ${mention(p2)}`,
-          `After reviewing the dispute set by <@${reporterId}> regarding a **no show**, the Referees team has decided that ${mention(culpritUser)} failed to show in time and, per **6.2.5**, the penalty is **three (3) penalty points**.`,
+          `${mention(p1User)} ${mention(p2User)}`,
+          `After reviewing the dispute set by <@${reporterId}> regarding a **no show**, the Referees team has decided that ${mention(culpritUser)} failed to show in time and, per **6.2.4**, the penalty is **one (1) penalty point**.`,
           '',
           'The remaining games are to be played.',
           formatReminderFooter(),
         ].join('\n');
       } else if (sub === 'no_show_24h') {
+        // 6.2.5 — 3 points (last 24h window)
         body = [
-          `${mention(p1)} ${mention(p2)}`,
-          `After reviewing the dispute set by <@${reporterId}> regarding a **no show (within the last 24 hours)**, the Referees team has decided that ${mention(culpritUser)} failed to show in time and, per **6.2.4/6.2.5**, the penalty is **one (1) penalty point**.`,
+          `${mention(p1User)} ${mention(p2User)}`,
+          `After reviewing the dispute set by <@${reporterId}> regarding a **no show (within the last 24 hours)**, the Referees team has decided that ${mention(culpritUser)} failed to show in time and, per **6.2.5**, the penalty is **three (3) penalty points**.`,
           '',
           'The remaining games are to be played.',
           formatReminderFooter(),
@@ -453,9 +525,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({ ephemeral: true, content: `✅ Posted to <#${targetChannel.id}>.` });
     } catch (e) {
       console.error(e);
-      try {
-        await interaction.reply({ ephemeral: true, content: 'Failed to post decision. Check my permissions and try again.' });
-      } catch {}
+      try { await interaction.reply({ ephemeral: true, content: 'Failed to post decision. Check my permissions and try again.' }); } catch {}
     }
   }
 });
@@ -465,7 +535,6 @@ client.once(Events.ClientReady, async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(token);
 
-  // Config check
   try {
     const g = await client.guilds.fetch(GUILD_ID);
     const guild = await g.fetch();
@@ -480,13 +549,10 @@ client.once(Events.ClientReady, async () => {
     console.error('Config check failed:', e?.code || e?.message || e);
   }
 
-  // Register in every guild the bot is in (GUILD-ONLY)
+  // Register in all guilds (guild-only)
   try {
     const guilds = await client.guilds.fetch();
-    console.log(
-      'Guilds I am in:',
-      [...guilds.values()].map((g) => `${g.name} (${g.id})`).join(', ') || '(none)',
-    );
+    console.log('Guilds I am in:', [...guilds.values()].map((g) => `${g.name} (${g.id})`).join(', ') || '(none)');
 
     for (const [id, g2] of guilds) {
       try {
@@ -500,7 +566,7 @@ client.once(Events.ClientReady, async () => {
     console.error('Failed to fetch guilds:', e);
   }
 
-  // 🔥 Clear GLOBAL commands so you don’t get duplicates
+  // Clear GLOBAL commands to avoid duplicates
   try {
     await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
     console.log('🧹 Cleared GLOBAL commands (guild-only now).');
