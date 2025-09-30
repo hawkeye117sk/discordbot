@@ -404,7 +404,8 @@ const cmdDecision = new SlashCommandBuilder()
        { name: 'Lag – Win → P1', value: 'lag_win_p1' },
        { name: 'Lag – Win → P2', value: 'lag_win_p2' },
        // Communication
-       { name: 'Communication – Did not communicate', value: 'comm_bad' },
+       { name: 'Communication – Missed to one opponent (6.1 – 1pt)', value: 'comm_bad_1' },
+       { name: 'Communication – Missed to both opponents (6.1 – 3pt)', value: 'comm_bad_3' },
        { name: 'Communication – Dispute invalid', value: 'comm_invalid' },
        // Device
        { name: 'Device – Rematch', value: 'dev_rematch' },
@@ -604,12 +605,20 @@ function buildDecisionText(meta, opts, raiserId) {
       break;
 
     // --- Communication ---
-    case 'comm_bad':
-      lines.push(`**Did not communicate sufficiently.**`);
+      case 'comm_bad_1': // missed comms to one opponent → 1pt
+      case 'comm_bad':   // (back-compat) treat old value as 1pt
+      lines.push('**Did not communicate sufficiently.**');
       lines.push(`Subsequent to 6.1, a penalty point is issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
       break;
-    case 'comm_invalid':
+
+      case 'comm_bad_3': // missed comms to both opponents in the pair → 3pt
+      lines.push('**Did not communicate sufficiently (both opponents in the pair).**');
+      lines.push(`Subsequent to 6.1, **3 penalty points** are issued in favour of **${favourCountry}**.`);
+      lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
+      break;
+
+      case 'comm_invalid':
       lines.push('The dispute is **ruled invalid** under 6.1.');
       lines.push('Both players are to communicate and agree a new time to battle within the next 24 hours.');
       lines.push('If scheduling or communication issues persist please contact team captains first.');
