@@ -35,10 +35,10 @@ for (const [k, v] of Object.entries({
 }
 
 // ====== STATE ======
-const disputeToRefThread = new Map();     // disputeThreadId -> refThreadId (if request was a thread)
-const playerToRefThread = new Map();      // userId -> refThreadId
+const disputeToRefThread = new Map();     // disputeThreadId -> refThreadId (if the request itself was a thread)
+const playerToRefThread = new Map();      // userId -> refThreadId (DM mirroring)
 const refThreadToPlayer = new Map();      // refThreadId -> raiser userId
-const refThreadToOrigin = new Map();      // refThreadId -> {channelId, messageId}
+const refThreadToOrigin = new Map();      // refThreadId -> {channelId, messageId} to delete on /close
 const closedPlayers = new Set();          // userIds with closed dispute (DM mirror blocked)
 const refMeta = new Map();                // refThreadId -> {p1Id,p2Id,issue, playerCountry, opponentCountry}
 
@@ -86,7 +86,7 @@ async function findDecisionChannel(guild, countryA, countryB) {
 async function createRefThread(guild, disputeMessage) {
   const refHub = await guild.channels.fetch(REF_HUB_CHANNEL_ID);
   if (!refHub || refHub.type !== ChannelType.GuildText)
-    throw new Error('#disputes-referees must be a TEXT channel that allows private threads.');
+    throw new Error('#dispute-referees must be a TEXT channel that allows private threads.');
 
   const playerName = disputeMessage.author.globalName || disputeMessage.author.username;
   const thread = await refHub.threads.create({
@@ -244,7 +244,7 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Create thread
+    // Create thread (or reuse if request is already a thread)
     const disputeThread =
       (message.channel.type === ChannelType.PublicThread || message.channel.type === ChannelType.PrivateThread)
         ? message.channel
@@ -319,6 +319,16 @@ client.on(Events.MessageCreate, async (message) => {
     console.error('DM mirror error:', e);
   }
 });
+
+// ====== VOTE MAPPING ======
+const VOTE_CHOICES = {
+  rematch:      { label: 'Rematch',      emoji: '🔁' },
+  no_rematch:   { label: 'No Rematch',   emoji: '❌' },
+  invalid:      { label: 'Invalid',      emoji: '🚫' },
+  defwin:       { label: 'Defwin',       emoji: '🏆' },
+  warning:      { label: 'Warning',      emoji: '⚠️' },
+  penalty:      { label: 'Penalty',      emoji: '🟨' },
+};
 
 // ====== SLASH COMMANDS ======
 const ISSUE_CHOICES = [
@@ -467,7 +477,71 @@ const cmdDecision = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
-const slashCommands = [cmdSetPlayers, cmdSetIssue, cmdMessage, cmdCountryPost, cmdClose, cmdDecision];
+// ---- /vote ----
+const cmdVote = new SlashCommandBuilder()
+  .setName('vote')
+  .setDescription('Create a vote and add reaction options.')
+  .addStringOption(o => o.setName('title').setDescription('Heading (default: Vote time!)').setRequired(false))
+  .addStringOption(o => o.setName('opt1').setDescription('Option 1').setRequired(true)
+    .addChoices(
+      { name: 'Rematch', value: 'rematch' },
+      { name: 'No Rematch', value: 'no_rematch' },
+      { name: 'Invalid', value: 'invalid' },
+      { name: 'Defwin', value: 'defwin' },
+      { name: 'Warning', value: 'warning' },
+      { name: 'Penalty', value: 'penalty' },
+    ))
+  .addStringOption(o => o.setName('opt2').setDescription('Option 2').setRequired(true)
+    .addChoices(
+      { name: 'Rematch', value: 'rematch' },
+      { name: 'No Rematch', value: 'no_rematch' },
+      { name: 'Invalid', value: 'invalid' },
+      { name: 'Defwin', value: 'defwin' },
+      { name: 'Warning', value: 'warning' },
+      { name: 'Penalty', value: 'penalty' },
+    ))
+  .addStringOption(o => o.setName('opt3').setDescription('Option 3').setRequired(false)
+    .addChoices(
+      { name: 'Rematch', value: 'rematch' },
+      { name: 'No Rematch', value: 'no_rematch' },
+      { name: 'Invalid', value: 'invalid' },
+      { name: 'Defwin', value: 'defwin' },
+      { name: 'Warning', value: 'warning' },
+      { name: 'Penalty', value: 'penalty' },
+    ))
+  .addStringOption(o => o.setName('opt4').setDescription('Option 4').setRequired(false)
+    .addChoices(
+      { name: 'Rematch', value: 'rematch' },
+      { name: 'No Rematch', value: 'no_rematch' },
+      { name: 'Invalid', value: 'invalid' },
+      { name: 'Defwin', value: 'defwin' },
+      { name: 'Warning', value: 'warning' },
+      { name: 'Penalty', value: 'penalty' },
+    ))
+  .addStringOption(o => o.setName('opt5').setDescription('Option 5').setRequired(false)
+    .addChoices(
+      { name: 'Rematch', value: 'rematch' },
+      { name: 'No Rematch', value: 'no_rematch' },
+      { name: 'Invalid', value: 'invalid' },
+      { name: 'Defwin', value: 'defwin' },
+      { name: 'Warning', value: 'warning' },
+      { name: 'Penalty', value: 'penalty' },
+    ))
+  .addStringOption(o => o.setName('opt6').setDescription('Option 6').setRequired(false)
+    .addChoices(
+      { name: 'Rematch', value: 'rematch' },
+      { name: 'No Rematch', value: 'no_rematch' },
+      { name: 'Invalid', value: 'invalid' },
+      { name: 'Defwin', value: 'defwin' },
+      { name: 'Warning', value: 'warning' },
+      { name: 'Penalty', value: 'penalty' },
+    ))
+  .addBooleanOption(o => o.setName('here').setDescription('Tag @here (default: true)').setRequired(false))
+  .addChannelOption(o => o.setName('channel').setDescription('Post in another channel (optional)').setRequired(false))
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+  .toJSON();
+
+const slashCommands = [cmdSetPlayers, cmdSetIssue, cmdMessage, cmdCountryPost, cmdClose, cmdDecision, cmdVote];
 
 // ====== DECISION TEXT BUILDER ======
 function teamRuleLines(rule) {
@@ -501,7 +575,6 @@ function buildDecisionText(meta, opts, raiserId) {
   const header = decisionHeader(meta, raiserId, null);
   const lines = [];
 
-  // helpers
   const favourCountry = (opts.favour === 'p1_country') ? p1c
                         : (opts.favour === 'p2_country') ? p2c
                         : '(country)';
@@ -597,7 +670,6 @@ function buildDecisionText(meta, opts, raiserId) {
       lines.push('Decision recorded.');
   }
 
-  // Standard footer
   lines.push('');
   lines.push('We would like to remind all parties involved that referees and staff members from countries involved in disputes cannot be involved in the resolution of the dispute.');
   lines.push('');
@@ -745,7 +817,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       device_player, pokemon, old_move, new_move, penalty_against
     }, raiserId);
 
-    // Pick target channel: override -> auto-detect -> thread only
+    // target: override -> auto country chan -> thread
     let targetChannel = overrideChan;
     if (!targetChannel) {
       targetChannel = await findDecisionChannel(
@@ -760,13 +832,55 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await targetChannel.send(text);
         await ch.send(`📣 Decision posted to <#${targetChannel.id}>.`);
       } else {
-        // fallback: keep it in the dispute thread
         await ch.send(text);
       }
       return interaction.reply({ content: 'Decision posted.', ephemeral: true });
     } catch (e) {
       console.error('decision post error', e);
       return interaction.reply({ ephemeral: true, content: 'Failed to post decision.' });
+    }
+  }
+
+  if (interaction.commandName === 'vote') {
+    const title = interaction.options.getString('title') || 'Vote time!';
+    const here  = interaction.options.getBoolean('here');
+    const override = interaction.options.getChannel('channel', false);
+
+    const keys = ['opt1','opt2','opt3','opt4','opt5','opt6']
+      .map((k, idx) => interaction.options.getString(k, idx < 2)) // first two required
+      .filter(Boolean);
+
+    const seen = new Set();
+    const items = [];
+    for (const k of keys) {
+      const key = String(k).toLowerCase();
+      if (!VOTE_CHOICES[key] || seen.has(key)) continue;
+      seen.add(key);
+      items.push(VOTE_CHOICES[key]);
+    }
+
+    if (items.length < 2) {
+      return interaction.reply({ ephemeral: true, content: 'Pick at least two distinct options.' });
+    }
+
+    let target = override || interaction.channel;
+    if (!target) return interaction.reply({ ephemeral: true, content: 'No valid channel to post in.' });
+
+    const lines = items.map(it => `${it.emoji} : ${it.label}`);
+    const content =
+      `${here !== false ? '@here\n\n' : ''}` +
+      `**${title}**\n\n` +
+      lines.join('\n');
+
+    try {
+      const msg = await target.send({ content, allowedMentions: { parse: ['everyone'] } });
+      for (const it of items) {
+        await msg.react(it.emoji).catch(() => {});
+      }
+      return interaction.reply({ ephemeral: true, content: `Vote created with ${items.length} option(s).` });
+    } catch (e) {
+      console.error('vote error', e);
+      return interaction.reply({ ephemeral: true, content: 'Failed to post vote (check Add Reactions & Mention Everyone permissions).' });
     }
   }
 });
