@@ -69,7 +69,7 @@ const ORIGINS = {
 const disputeToRefThread = new Map();     // disputeThreadId -> refThreadId (if the request itself was a thread)
 const playerToRefThread = new Map();      // userId -> refThreadId (DM mirroring)
 const refThreadToPlayer = new Map();      // refThreadId -> raiser userId
-const refThreadToOrigin = new Map();      // refThreadId -> {originGuildId, channelId, messageId} to delete on /close
+const refThreadToOrigin = new Map();      // refThreadId -> {originGuildId, channelId, messageId}
 const closedPlayers = new Set();          // userIds with closed dispute (DM mirror blocked)
 const refMeta = new Map();                // refThreadId -> {p1Id,p2Id,issue, playerCountry, opponentCountry, originGuildId}
 
@@ -412,11 +412,9 @@ const cmdSetPlayers = new SlashCommandBuilder()
 const cmdSetIssue = new SlashCommandBuilder()
   .setName('set_issue')
   .setDescription('Set the issue and rename the thread.')
-  .addStringOption(o => {
-    o.setName('issue').setDescription('Issue type').setRequired(true);
-    ISSUE_CHOICES.forEach(c => o.addChoices(c));
-    return o;
-  })
+  .addStringOption(o =>
+    o.setName('issue').setDescription('Issue type').setRequired(true).addChoices(...ISSUE_CHOICES)
+  )
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
@@ -439,7 +437,7 @@ const cmdMessage = new SlashCommandBuilder()
 
 const cmdCountryPost = new SlashCommandBuilder()
   .setName('country_post')
-  .setDescription('Post a message to the country channel.')
+  .setDescription('Post a message to the origin country channel.')
   .addStringOption(o => o.setName('text').setDescription('Message').setRequired(true))
   .addChannelOption(o => o.setName('channel').setDescription('Override channel').setRequired(false))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
@@ -528,7 +526,7 @@ const cmdDecision = new SlashCommandBuilder()
      .setRequired(false))
   .addStringOption(o =>
     o.setName('penalty_against')
-     .setDescription('Wrong Pkm/Moveset: penalize country')
+     .setDescription('Penalty goes to which country')
      .setRequired(false)
      .addChoices(
        { name: 'Player1 country', value: 'p1_country' },
@@ -1018,17 +1016,17 @@ client.once(Events.ClientReady, async () => {
         await rest.put(Routes.applicationGuildCommands(client.user.id, id), { body: slashCommands });
         console.log(`✅ Commands registered in: ${g?.name || id}`);
       } catch (e) {
-        console.error(`❌ Failed to register in guild ${id}:`, e?.code || e?.message || e);
+        const raw = e?.rawError || e;
+        console.error(`❌ Failed to register in guild ${id} (${g?.name || 'unknown'}):`, e?.code || e?.status || e?.message || e);
+        if (raw?.errors) {
+          console.error('   ↳ Details:', JSON.stringify(raw.errors, null, 2));
+        }
       }
     }
-} catch (e) {
-  const raw = e?.rawError || e;
-  console.error(`❌ Failed to register in guild ${id} (${g?.name || 'unknown'}):`, e?.code || e?.status || e?.message || e);
-  if (raw?.errors) {
-    console.error('   ↳ Details:', JSON.stringify(raw.errors, null, 2));
+  } catch (e) {
+    console.error('Failed to fetch guilds:', e);
   }
-}
-
+});
 
 // ====== BOOT ======
 client.login(token);
