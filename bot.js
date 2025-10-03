@@ -1021,10 +1021,14 @@ client.once(Events.ClientReady, async () => {
         console.error(`❌ Failed to register in guild ${id}:`, e?.code || e?.message || e);
       }
     }
-  } catch (e) {
-    console.error('Failed to fetch guilds:', e);
+} catch (e) {
+  const raw = e?.rawError || e;
+  console.error(`❌ Failed to register in guild ${id} (${g?.name || 'unknown'}):`, e?.code || e?.status || e?.message || e);
+  if (raw?.errors) {
+    console.error('   ↳ Details:', JSON.stringify(raw.errors, null, 2));
   }
-});
+}
+
 
 // ====== BOOT ======
 client.login(token);
