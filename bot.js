@@ -543,7 +543,7 @@ const cmdDecision = new SlashCommandBuilder()
 const cmdVote = new SlashCommandBuilder()
   .setName('vote')
   .setDescription('Create a vote and add reaction options.')
-  .addStringOption(o => o.setName('title').setDescription('Heading (default: Vote time!)').setRequired(false))
+  // REQUIRED FIRST
   .addStringOption(o => o.setName('opt1').setDescription('Option 1').setRequired(true)
     .addChoices(
       { name: 'Rematch', value: 'rematch' },
@@ -562,6 +562,8 @@ const cmdVote = new SlashCommandBuilder()
       { name: 'Warning', value: 'warning' },
       { name: 'Penalty', value: 'penalty' },
     ))
+  // OPTIONAL AFTER
+  .addStringOption(o => o.setName('title').setDescription('Heading (default: Vote time!)').setRequired(false))
   .addStringOption(o => o.setName('opt3').setDescription('Option 3').setRequired(false)
     .addChoices(
       { name: 'Rematch', value: 'rematch' },
