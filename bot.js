@@ -258,6 +258,7 @@ async function removeConflictedFromThread(thread, destGuild, countries /* array 
 
 // ====== MESSAGE HANDLERS ======
 
+// Trigger: @Referee in either origin server's dispute channel -> create thread in Gymbreakers
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
@@ -265,7 +266,6 @@ client.on(Events.MessageCreate, async (message) => {
     const originCfg = ORIGINS[message.guild.id];
     if (!originCfg) return; // ignore other servers
 
-    // Must be in that origin's Dispute Request channel + mention that origin's trigger role
     const inOriginDisputeChan =
       message.channel.id === originCfg.disputeChannelId ||
       message.channel?.parentId === originCfg.disputeChannelId;
@@ -288,7 +288,7 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     // Destination (Gymbreakers) for thread creation
-    const destGuild = await client.guilds.fetch(DEST_GUILD_ID).then(g => g.fetch()).catch(() => null);
+    const destGuild = await client.guilds.fetch(DEST_GUILD_ID).catch(() => null);
     if (!destGuild) {
       console.error('❌ Cannot fetch destination guild for thread creation.');
       return;
@@ -333,7 +333,7 @@ client.on(Events.MessageCreate, async (message) => {
       originGuildName: message.guild?.name
     }));
 
-    // Add refs/rem conflicts in DEST guild
+    // Add refs / remove conflicts in DEST guild
     await addAllRefsToThread(refThread, destGuild);
     await removeConflictedFromThread(
       refThread,
@@ -539,7 +539,7 @@ const cmdDecision = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
-// ---- /vote ----
+// ---- /vote ----  (required options FIRST)
 const cmdVote = new SlashCommandBuilder()
   .setName('vote')
   .setDescription('Create a vote and add reaction options.')
@@ -1005,28 +1005,55 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ====== READY (register commands) ======
+// ====== READY (register commands & log guilds) ======
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   const rest = new REST({ version: '10' }).setToken(token);
 
-  try {
-    const guilds = await client.guilds.fetch();
-    for (const [id, g] of guilds) {
-      try {
-        await rest.put(Routes.applicationGuildCommands(client.user.id, id), { body: slashCommands });
-        console.log(`✅ Commands registered in: ${g?.name || id}`);
-      } catch (e) {
-        const raw = e?.rawError || e;
-        console.error(`❌ Failed to register in guild ${id} (${g?.name || 'unknown'}):`, e?.code || e?.status || e?.message || e);
-        if (raw?.errors) {
-          console.error('   ↳ Details:', JSON.stringify(raw.errors, null, 2));
-        }
-      }
+  const guilds = await client.guilds.fetch();
+  console.log(
+    '🧭 In guilds:',
+    guilds.size
+      ? [...guilds.values()].map(g => `${g.name} (${g.id})`).join(', ')
+      : 'none'
+  );
+
+  for (const [id, g] of guilds) {
+    try {
+      await rest.put(
+        Routes.applicationGuildCommands(client.user.id, id),
+        { body: slashCommands }
+      );
+      console.log(`✅ Commands registered in: ${g?.name || id}`);
+    } catch (e) {
+      const raw = e?.rawError || e;
+      console.error(
+        `❌ Failed to register in guild ${id} (${g?.name || 'unknown'}):`,
+        e?.code || e?.status || e?.message || e
+      );
+      if (raw?.errors) console.error('   ↳ Details:', JSON.stringify(raw.errors, null, 2));
     }
+  }
+});
+
+// Auto-register when invited to a new server
+client.on(Events.GuildCreate, async (g) => {
+  console.log(`➕ Joined guild: ${g.name} (${g.id}) — registering commands`);
+  const rest = new REST({ version: '10' }).setToken(token);
+  try {
+    await rest.put(
+      Routes.applicationGuildCommands(client.user.id, g.id),
+      { body: slashCommands }
+    );
+    console.log(`✅ Commands registered in new guild: ${g.name} (${g.id})`);
   } catch (e) {
-    console.error('Failed to fetch guilds:', e);
+    const raw = e?.rawError || e;
+    console.error(
+      `❌ Failed to register in new guild ${g.id} (${g?.name}):`,
+      e?.code || e?.status || e?.message || e
+    );
+    if (raw?.errors) console.error('   ↳ Details:', JSON.stringify(raw.errors, null, 2));
   }
 });
 
