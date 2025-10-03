@@ -14,20 +14,36 @@ if (!token || !token.includes('.')) {
   process.exit(1);
 }
 
-const {
-  GUILD_ID,
-  DISPUTE_CHANNEL_ID,
-  REF_HUB_CHANNEL_ID,
-  REF_ROLE_ID,
-  JR_REF_ROLE_ID,
-  TRIGGER_ROLE_ID,
-  DISPUTE_REVIEW_CHANNEL_ID, // optional: used by /close DM text
-  RULES_CHANNEL_ID           // optional: 📓rules-for-worlds
-} = process.env;
+// ---- Destination (Gymbreakers) for ALL dispute threads
+const DEST_GUILD_ID              = (process.env.DEST_GUILD_ID ?? '').trim();
+const DEST_REF_HUB_CHANNEL_ID    = (process.env.DEST_REF_HUB_CHANNEL_ID ?? '').trim();
 
+// ---- Gymbreakers (origin A)
+const GYM_GUILD_ID               = (process.env.GYM_GUILD_ID ?? '').trim();
+const GYM_DISPUTE_CHANNEL_ID     = (process.env.GYM_DISPUTE_CHANNEL_ID ?? '').trim();
+const GYM_TRIGGER_ROLE_ID        = (process.env.GYM_TRIGGER_ROLE_ID ?? '').trim();
+const GYM_RULES_CHANNEL_ID       = (process.env.GYM_RULES_CHANNEL_ID ?? '').trim(); // optional
+
+// ---- Pogo Raiders (origin B)
+const RAID_GUILD_ID              = (process.env.RAID_GUILD_ID ?? '').trim();
+const RAID_DISPUTE_CHANNEL_ID    = (process.env.RAID_DISPUTE_CHANNEL_ID ?? '').trim();
+const RAID_TRIGGER_ROLE_ID       = (process.env.RAID_TRIGGER_ROLE_ID ?? '').trim();
+const RAID_RULES_CHANNEL_ID      = (process.env.RAID_RULES_CHANNEL_ID ?? '').trim(); // optional
+
+// ---- Destination ref roles (exist in Gymbreakers)
+const REF_ROLE_ID                = (process.env.REF_ROLE_ID ?? '').trim();
+const JR_REF_ROLE_ID             = (process.env.JR_REF_ROLE_ID ?? '').trim();
+
+// ---- Optional
+const DISPUTE_REVIEW_CHANNEL_ID  = (process.env.DISPUTE_REVIEW_CHANNEL_ID ?? '').trim(); // optional, in destination guild
+const RULES_CHANNEL_ID           = (process.env.RULES_CHANNEL_ID ?? '').trim(); // legacy global optional
+
+// Required checks
 for (const [k, v] of Object.entries({
-  GUILD_ID, DISPUTE_CHANNEL_ID, REF_HUB_CHANNEL_ID,
-  REF_ROLE_ID, JR_REF_ROLE_ID, TRIGGER_ROLE_ID
+  DEST_GUILD_ID, DEST_REF_HUB_CHANNEL_ID,
+  GYM_GUILD_ID, GYM_DISPUTE_CHANNEL_ID, GYM_TRIGGER_ROLE_ID,
+  RAID_GUILD_ID, RAID_DISPUTE_CHANNEL_ID, RAID_TRIGGER_ROLE_ID,
+  REF_ROLE_ID, JR_REF_ROLE_ID
 })) {
   if (!v) {
     console.error(`❌ Missing required env var: ${k}`);
@@ -35,13 +51,29 @@ for (const [k, v] of Object.entries({
   }
 }
 
+// Per-origin config map
+const ORIGINS = {
+  [GYM_GUILD_ID]: {
+    key: 'GYM',
+    disputeChannelId: GYM_DISPUTE_CHANNEL_ID,
+    triggerRoleId: GYM_TRIGGER_ROLE_ID,
+    rulesChannelId: GYM_RULES_CHANNEL_ID || null
+  },
+  [RAID_GUILD_ID]: {
+    key: 'RAID',
+    disputeChannelId: RAID_DISPUTE_CHANNEL_ID,
+    triggerRoleId: RAID_TRIGGER_ROLE_ID,
+    rulesChannelId: RAID_RULES_CHANNEL_ID || null
+  }
+};
+
 // ====== STATE ======
 const disputeToRefThread = new Map();     // disputeThreadId -> refThreadId (if the request itself was a thread)
 const playerToRefThread = new Map();      // userId -> refThreadId (DM mirroring)
 const refThreadToPlayer = new Map();      // refThreadId -> raiser userId
-const refThreadToOrigin = new Map();      // refThreadId -> {channelId, messageId} to delete on /close
+const refThreadToOrigin = new Map();      // refThreadId -> {originGuildId, channelId, messageId} to delete on /close
 const closedPlayers = new Set();          // userIds with closed dispute (DM mirror blocked)
-const refMeta = new Map();                // refThreadId -> {p1Id,p2Id,issue, playerCountry, opponentCountry}
+const refMeta = new Map();                // refThreadId -> {p1Id,p2Id,issue, playerCountry, opponentCountry, originGuildId}
 
 // ====== CLIENT ======
 const client = new Client({
@@ -77,7 +109,7 @@ function getOpponentCountryFromMessage(message, excludeName) {
 }
 
 async function findDecisionChannel(guild, countryA, countryB) {
-  if (!countryA || !countryB) return null;
+  if (!guild || !countryA || !countryB) return null;
   const a = slug(countryA), b = slug(countryB);
   const chans = guild.channels.cache.filter(
     c => c.type === ChannelType.GuildText && c.name.includes(a) && c.name.includes(b)
@@ -85,28 +117,36 @@ async function findDecisionChannel(guild, countryA, countryB) {
   return chans.find(c => /^post|^result/.test(c.name)) || chans.first() || null;
 }
 
-async function createRefThread(guild, disputeMessage) {
-  const refHub = await guild.channels.fetch(REF_HUB_CHANNEL_ID);
+async function createRefThreadInDestination(destGuild, sourceMessage) {
+  const refHub = await destGuild.channels.fetch(DEST_REF_HUB_CHANNEL_ID);
   if (!refHub || refHub.type !== ChannelType.GuildText)
-    throw new Error('#dispute-referees must be a TEXT channel that allows private threads.');
+    throw new Error('#dispute-referees must be a TEXT channel that allows private threads (destination).');
 
-  const playerName = disputeMessage.author.globalName || disputeMessage.author.username;
+  const playerName = sourceMessage.author.globalName || sourceMessage.author.username;
   const thread = await refHub.threads.create({
     name: `Dispute – ${playerName}`,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     type: ChannelType.PrivateThread,
     invitable: false,
   });
+
+  // Post a source link jump for refs
+  try {
+    await thread.send([
+      `🔗 **Source:** ${sourceMessage.url}`,
+      `🗺️ **Origin Server:** ${sourceMessage.guild?.name || sourceMessage.guildId}`
+    ].join('\n'));
+  } catch {}
   return thread;
 }
 
-function buildIntro({ playerName, playerCountry, opponentCountry }) {
+function buildIntro({ playerName, playerCountry, opponentCountry, originGuildName }) {
   const refRoleMention = `<@&${REF_ROLE_ID}>`;
   const jrRoleMention  = `<@&${JR_REF_ROLE_ID}>`;
   const countriesLine = (playerCountry?.name || opponentCountry?.name)
     ? `**Countries:** ${playerCountry?.name || 'Unknown'} vs ${opponentCountry?.name || 'Unknown'}`
     : `**Countries:** (not detected)`;
-  const sourceLine = `**Source:** <#${DISPUTE_CHANNEL_ID}>`;
+  const sourceLine = `**Origin:** ${originGuildName || 'Unknown'}`;
 
   return [
     `${refRoleMention} ${jrRoleMention}`,
@@ -174,10 +214,10 @@ async function dmDisputeRaiser(message, disputeThread) {
   }
 }
 
-// ====== Referee membership flow ======
+// ====== Referee membership flow (destination guild) ======
 // 1) Add ALL referees (Referee + Junior Referee) to the private thread
-async function addAllRefsToThread(thread, guild) {
-  const all = await guild.members.fetch();
+async function addAllRefsToThread(thread, destGuild) {
+  const all = await destGuild.members.fetch();
   const refs = all.filter(m => m.roles.cache.has(REF_ROLE_ID) || m.roles.cache.has(JR_REF_ROLE_ID));
 
   let added = 0;
@@ -189,7 +229,7 @@ async function addAllRefsToThread(thread, guild) {
 }
 
 // 2) Remove conflicted refs already in the thread (match by exact role name or bracket code like [GB])
-async function removeConflictedFromThread(thread, guild, countries /* array of names */) {
+async function removeConflictedFromThread(thread, destGuild, countries /* array of names */) {
   const countryNames = (countries || []).filter(Boolean);
   const countryCodes = countryNames.map(bracketCode).filter(Boolean);
 
@@ -197,7 +237,7 @@ async function removeConflictedFromThread(thread, guild, countries /* array of n
 
   const kicked = [];
   for (const tm of thread.members.cache.values()) {
-    const gm = await guild.members.fetch(tm.id).catch(() => null);
+    const gm = await destGuild.members.fetch(tm.id).catch(() => null);
     if (!gm) continue;
 
     const hasConflict = gm.roles.cache.some(r => {
@@ -221,23 +261,27 @@ async function removeConflictedFromThread(thread, guild, countries /* array of n
 
 // ====== MESSAGE HANDLERS ======
 
-// Trigger: @Referee in #dispute-request -> create thread, intro post, DM user, add refs then purge conflicts
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
 
-    const inDispute =
-      message.channel.id === DISPUTE_CHANNEL_ID ||
-      message.channel?.parentId === DISPUTE_CHANNEL_ID;
-    const mentioned = messageMentionsRole(message, TRIGGER_ROLE_ID);
-    if (!inDispute || !mentioned) return;
+    const originCfg = ORIGINS[message.guild.id];
+    if (!originCfg) return; // not an origin guild we care about
 
-    // Countries
+    // Must be in that origin's Dispute Request channel + mention that origin's trigger role
+    const inOriginDisputeChan =
+      message.channel.id === originCfg.disputeChannelId ||
+      message.channel?.parentId === originCfg.disputeChannelId;
+
+    const mentioned = messageMentionsRole(message, originCfg.triggerRoleId);
+    if (!inOriginDisputeChan || !mentioned) return;
+
+    // Countries — detect from ORIGIN guild roles/mentions
     const member = await message.guild.members.fetch(message.author.id);
     const playerCountry = getMemberCountry(member);
     const opponentCountry = getOpponentCountryFromMessage(message, playerCountry.name);
 
-    // Require opponent country (and not equal to raiser's)
+    // Require opponent country
     if (!opponentCountry.name) {
       await message.reply({
         content: 'I couldn’t detect an **opponent country**. Please **re-raise the issue and tag the opponent country role** (a role whose name includes `[XX]`).',
@@ -246,42 +290,61 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Create thread (or reuse if request is already a thread)
-    const disputeThread =
-      (message.channel.type === ChannelType.PublicThread || message.channel.type === ChannelType.PrivateThread)
-        ? message.channel
-        : null;
+    // Destination (Gymbreakers) for thread creation
+    const destGuild = await client.guilds.fetch(DEST_GUILD_ID).then(g => g.fetch()).catch(() => null);
+    if (!destGuild) {
+      console.error('❌ Cannot fetch destination guild for thread creation.');
+      return;
+    }
 
-    let refThread = disputeThread ? await message.guild.channels
+    // If request already a thread, reuse mapping; else create new thread in DEST guild
+    const isThread = (message.channel.type === ChannelType.PublicThread || message.channel.type === ChannelType.PrivateThread);
+    const disputeThread = isThread ? message.channel : null;
+
+    let refThread = disputeThread ? await destGuild.channels
       .fetch(disputeToRefThread.get(disputeThread.id) || '0').catch(() => null) : null;
 
     if (!refThread) {
-      refThread = await createRefThread(message.guild, message);
+      refThread = await createRefThreadInDestination(destGuild, message);
       if (disputeThread) disputeToRefThread.set(disputeThread.id, refThread.id);
     }
 
-    // Seed meta, mappings
+    // Seed meta, mappings (store ORIGIN guild id for later ops)
     refMeta.set(refThread.id, {
       p1Id: message.author.id,
       p2Id: null,
       issue: null,
       playerCountry,
-      opponentCountry
+      opponentCountry,
+      originGuildId: message.guild.id
     });
     playerToRefThread.set(message.author.id, refThread.id);
     refThreadToPlayer.set(refThread.id, message.author.id);
-    refThreadToOrigin.set(refThread.id, { channelId: message.channel.id, messageId: message.id });
+    refThreadToOrigin.set(refThread.id, {
+      originGuildId: message.guild.id,
+      channelId: message.channel.id,
+      messageId: message.id
+    });
     closedPlayers.delete(message.author.id);
 
-    // Intro post (single)
+    // Intro post in DEST thread
     const playerName = message.author.globalName || message.author.username;
-    await refThread.send(buildIntro({ playerName, playerCountry, opponentCountry }));
+    await refThread.send(buildIntro({
+      playerName,
+      playerCountry,
+      opponentCountry,
+      originGuildName: message.guild?.name
+    }));
 
-    // Add all refs, then purge conflicted ones
-    await addAllRefsToThread(refThread, message.guild);
-    await removeConflictedFromThread(refThread, message.guild, [playerCountry?.name, opponentCountry?.name].filter(Boolean));
+    // Add refs/rem conflicts in DEST guild
+    await addAllRefsToThread(refThread, destGuild);
+    await removeConflictedFromThread(
+      refThread,
+      destGuild,
+      [playerCountry?.name, opponentCountry?.name].filter(Boolean)
+    );
 
-    // DM the player with questions
+    // DM the player with questions (origin still OK)
     await dmDisputeRaiser(message, disputeThread);
 
   } catch (err) {
@@ -289,7 +352,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// Mirror player DMs -> thread (ignore when closed)
+// Mirror player DMs -> DEST thread (ignore when closed)
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.guild) return;
@@ -571,6 +634,16 @@ function decisionHeader(meta, raiserId, issueForText) {
   ];
 }
 
+function getRulesChannelMention(meta) {
+  // Prefer per-origin rules channel
+  const originId = meta.originGuildId;
+  const byOrigin = (originId === GYM_GUILD_ID ? GYM_RULES_CHANNEL_ID
+                  : originId === RAID_GUILD_ID ? RAID_RULES_CHANNEL_ID
+                  : null);
+  const chosen = byOrigin || RULES_CHANNEL_ID || null;
+  return chosen ? `<#${chosen}>` : '📓rules-for-worlds';
+}
+
 function buildDecisionText(meta, opts, raiserId) {
   const p1 = mention(meta.p1Id), p2 = mention(meta.p2Id);
   const p1c = meta.playerCountry?.name || 'Player1 country';
@@ -608,14 +681,14 @@ function buildDecisionText(meta, opts, raiserId) {
       break;
 
     // --- Communication ---
-    case 'comm_bad_1': // missed comms to one opponent → 1pt
-    case 'comm_bad':   // (back-compat) treat old value as 1pt
+    case 'comm_bad_1':
+    case 'comm_bad':
       lines.push('**Did not communicate sufficiently.**');
       lines.push(`Subsequent to 6.1, a penalty point is issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
       break;
 
-    case 'comm_bad_3': // missed comms to both opponents in the pair → 3pt
+    case 'comm_bad_3':
       lines.push('**Did not communicate sufficiently (both opponents in the pair).**');
       lines.push(`Subsequent to 6.1, **3 penalty points** are issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
@@ -635,8 +708,7 @@ function buildDecisionText(meta, opts, raiserId) {
       const c2m = roleMention(meta.opponentCountry?.id, meta.opponentCountry?.name);
       const c1n = meta.playerCountry?.name || 'Country 1';
       const c2n = meta.opponentCountry?.name || 'Country 2';
-      const rules = (typeof RULES_CHANNEL_ID !== 'undefined' && RULES_CHANNEL_ID)
-        ? `<#${RULES_CHANNEL_ID}>` : '📓rules-for-worlds';
+      const rules = getRulesChannelMention(meta);
 
       const body = [
         `${c1m} ${c2m}`,
@@ -793,14 +865,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const text = interaction.options.getString('text', true);
 
     if (!target) {
-      target = await findDecisionChannel(
-        interaction.guild,
-        meta.playerCountry?.name,
-        meta.opponentCountry?.name
-      );
+      // Default to origin guild’s country channel
+      const originId = meta.originGuildId;
+      const originGuild = originId ? await interaction.client.guilds.fetch(originId).catch(() => null) : null;
+      if (originGuild) {
+        await originGuild.channels.fetch(); // hydrate cache
+        target = await findDecisionChannel(
+          originGuild,
+          meta.playerCountry?.name,
+          meta.opponentCountry?.name
+        );
+      }
     }
     if (!target || target.type !== ChannelType.GuildText) {
-      return interaction.reply({ ephemeral: true, content: 'No suitable country channel found. Provide one with the `channel` option.' });
+      return interaction.reply({ ephemeral: true, content: 'No suitable country channel found (origin). Provide one with the `channel` option.' });
     }
 
     try {
@@ -819,7 +897,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const origin = refThreadToOrigin.get(ch.id);
       if (origin) {
-        const srcChan = await interaction.guild.channels.fetch(origin.channelId).catch(() => null);
+        const srcGuild = await interaction.client.guilds.fetch(origin.originGuildId).catch(() => null);
+        const srcChan = srcGuild ? await srcGuild.channels.fetch(origin.channelId).catch(() => null) : null;
         if (srcChan?.type === ChannelType.GuildText || srcChan?.type === ChannelType.PublicThread) {
           const msg = await srcChan.messages.fetch(origin.messageId).catch(() => null);
           if (msg) await msg.delete().catch(() => {});
@@ -845,7 +924,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'decision') {
-    const outcome = interaction.options.getString('outcome', true);
+    const outcome = interaction.options.getString('outcome,', false) || interaction.options.getString('outcome', true);
     const team_rule = interaction.options.getString('team_rule', false) || null;
     const favour = interaction.options.getString('favour', false) || null;
     const schedule_window = interaction.options.getString('schedule_window', false) || null;
@@ -862,14 +941,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       device_player, pokemon, old_move, new_move, penalty_against
     }, raiserId);
 
-    // target: override -> auto country chan -> thread
+    // target: override -> origin guild country chan -> thread
     let targetChannel = overrideChan;
     if (!targetChannel) {
-      targetChannel = await findDecisionChannel(
-        interaction.guild,
-        meta.playerCountry?.name,
-        meta.opponentCountry?.name
-      );
+      const originId = meta.originGuildId;
+      const originGuild = originId ? await interaction.client.guilds.fetch(originId).catch(() => null) : null;
+      if (originGuild) {
+        await originGuild.channels.fetch(); // hydrate cache
+        targetChannel = await findDecisionChannel(
+          originGuild,
+          meta.playerCountry?.name,
+          meta.opponentCountry?.name
+        );
+      }
     }
 
     try {
