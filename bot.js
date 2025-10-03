@@ -21,7 +21,8 @@ const {
   REF_ROLE_ID,
   JR_REF_ROLE_ID,
   TRIGGER_ROLE_ID,
-  DISPUTE_REVIEW_CHANNEL_ID // optional: used by /close DM text
+  DISPUTE_REVIEW_CHANNEL_ID, // optional: used by /close DM text
+  RULES_CHANNEL_ID           // optional: 📓rules-for-worlds
 } = process.env;
 
 for (const [k, v] of Object.entries({
@@ -57,6 +58,7 @@ const client = new Client({
 // ====== UTILS ======
 const slug = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 const mention = id => id ? `<@${id}>` : '@Player';
+const roleMention = (id, fallbackName) => id ? `<@&${id}>` : (fallbackName || '@Country');
 const bracketCode = (name) => (name?.match(/\[([^\]]+)\]/)?.[1] || '').toLowerCase();
 
 function messageMentionsRole(message, roleId) {
@@ -407,6 +409,7 @@ const cmdDecision = new SlashCommandBuilder()
        { name: 'Communication – Missed to one opponent (6.1 – 1pt)', value: 'comm_bad_1' },
        { name: 'Communication – Missed to both opponents (6.1 – 3pt)', value: 'comm_bad_3' },
        { name: 'Communication – Dispute invalid', value: 'comm_invalid' },
+       { name: 'Communication – Force Substitution (no penalties)', value: 'comm_force_sub' },
        // Device
        { name: 'Device – Rematch', value: 'dev_rematch' },
        { name: 'Device – No Rematch', value: 'dev_no_rematch' },
@@ -605,24 +608,57 @@ function buildDecisionText(meta, opts, raiserId) {
       break;
 
     // --- Communication ---
-      case 'comm_bad_1': // missed comms to one opponent → 1pt
-      case 'comm_bad':   // (back-compat) treat old value as 1pt
+    case 'comm_bad_1': // missed comms to one opponent → 1pt
+    case 'comm_bad':   // (back-compat) treat old value as 1pt
       lines.push('**Did not communicate sufficiently.**');
       lines.push(`Subsequent to 6.1, a penalty point is issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
       break;
 
-      case 'comm_bad_3': // missed comms to both opponents in the pair → 3pt
+    case 'comm_bad_3': // missed comms to both opponents in the pair → 3pt
       lines.push('**Did not communicate sufficiently (both opponents in the pair).**');
       lines.push(`Subsequent to 6.1, **3 penalty points** are issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
       break;
 
-      case 'comm_invalid':
+    case 'comm_invalid':
       lines.push('The dispute is **ruled invalid** under 6.1.');
       lines.push('Both players are to communicate and agree a new time to battle within the next 24 hours.');
       lines.push('If scheduling or communication issues persist please contact team captains first.');
       break;
+
+    // --- Communication: Force Substitution (no penalties) ---
+    case 'comm_force_sub': {
+      const p1m = mention(meta.p1Id);
+      const p2m = mention(meta.p2Id);
+      const c1m = roleMention(meta.playerCountry?.id, meta.playerCountry?.name);
+      const c2m = roleMention(meta.opponentCountry?.id, meta.opponentCountry?.name);
+      const c1n = meta.playerCountry?.name || 'Country 1';
+      const c2n = meta.opponentCountry?.name || 'Country 2';
+      const rules = (typeof RULES_CHANNEL_ID !== 'undefined' && RULES_CHANNEL_ID)
+        ? `<#${RULES_CHANNEL_ID}>` : '📓rules-for-worlds';
+
+      const body = [
+        `${c1m} ${c2m}`,
+        '',
+        'After reviewing an evidence of the communication of the following players:',
+        `${p1m} & ${p2m}`,
+        '',
+        'Staff team has decided that a substitution will be necessary in this case to conclude this particular matchup:',
+        `❗${p1m} 0 - 0 ${p2m}`,
+        '',
+        'Please, both teams mention in your team channels, who will be the players replacing',
+        `❗${c1n}: ${p1m}`,
+        `❗${c2n}: ${p2m}`,
+        '',
+        'And make sure to tag @staff when making your decision! If both teams will decide to keep the same players, then we will be forcing both sides to either come to an agreement to play after all or both teams will have to choose other players from the roster.',
+        'Decisions must be made within the next 24 hours.',
+        `In terms of substitution rules, please visit ${rules}`,
+        'No penalties will be applied.',
+      ].join('\n');
+
+      return body; // exact text, no standard header/footer
+    }
 
     // --- Device Issue ---
     case 'dev_rematch':
