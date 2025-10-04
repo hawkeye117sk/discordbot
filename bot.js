@@ -1057,5 +1057,14 @@ client.on(Events.GuildCreate, async (g) => {
   }
 });
 
+client.once(Events.ClientReady, async () => {
+  const gs = await client.guilds.fetch();
+  console.log('🧭 Currently in guilds:');
+  for (const [id, g] of gs) console.log(`• ${g.name} (${id})`);
+});
+client.on(Events.GuildCreate, g => console.log(`➕ Joined: ${g.name} (${g.id})`));
+client.on(Events.GuildDelete, g => console.log(`➖ Removed: ${g.name} (${g.id})`));
+
+
 // ====== BOOT ======
 client.login(token);
