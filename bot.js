@@ -49,6 +49,9 @@ const RAID_TRIGGER_ROLE_ID       = '797983986152243200'; // Referee role as trig
 const DISPUTE_REVIEW_CHANNEL_ID  = ''; // lives in destination (Gymbreakers), optional
 const RULES_CHANNEL_ID           = ''; // optional global fallback for rules mention
 
+// The bot's user ID (for @bot mention triggers)
+const BOT_USER_ID = '1417212106461286410';
+
 // Per-origin config map
 const ORIGINS = {
   [GYM_GUILD_ID]: {
@@ -93,6 +96,14 @@ const bracketCode = (name) => (name?.match(/\[([^\]]+)\]/)?.[1] || '').toLowerCa
 
 function messageMentionsRole(message, roleId) {
   return message.mentions.roles.has(roleId) || message.content.includes(`<@&${roleId}>`);
+}
+
+// NEW: also allow mentioning the bot itself as a trigger
+function messageMentionsBot(message, botId) {
+  if (!botId) return false;
+  if (message.mentions?.users?.has(botId)) return true; // parsed mention
+  // literal mention fallback (<@ID> or <@!ID>)
+  return message.content.includes(`<@${botId}>`) || message.content.includes(`<@!${botId}>`);
 }
 
 function getMemberCountry(member) {
@@ -258,7 +269,7 @@ async function removeConflictedFromThread(thread, destGuild, countries /* array 
 
 // ====== MESSAGE HANDLERS ======
 
-// Trigger: @Referee in either origin server's dispute channel -> create thread in Gymbreakers
+// Trigger: @Referee **or** @Bot in either origin server's dispute channel -> create thread in Gymbreakers
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || message.author?.bot) return;
@@ -270,7 +281,12 @@ client.on(Events.MessageCreate, async (message) => {
       message.channel.id === originCfg.disputeChannelId ||
       message.channel?.parentId === originCfg.disputeChannelId;
 
-    const mentioned = messageMentionsRole(message, originCfg.triggerRoleId);
+    // NEW: allow either the referee role OR the bot mention to trigger
+    const botId = client.user?.id || BOT_USER_ID;
+    const mentionedRole = messageMentionsRole(message, originCfg.triggerRoleId);
+    const mentionedBot  = messageMentionsBot(message, botId);
+    const mentioned = mentionedRole || mentionedBot;
+
     if (!inOriginDisputeChan || !mentioned) return;
 
     // Countries — detect from ORIGIN guild roles/mentions
@@ -1057,14 +1073,9 @@ client.on(Events.GuildCreate, async (g) => {
   }
 });
 
-client.once(Events.ClientReady, async () => {
-  const gs = await client.guilds.fetch();
-  console.log('🧭 Currently in guilds:');
-  for (const [id, g] of gs) console.log(`• ${g.name} (${id})`);
-});
+// Extra join/leave logs
 client.on(Events.GuildCreate, g => console.log(`➕ Joined: ${g.name} (${g.id})`));
 client.on(Events.GuildDelete, g => console.log(`➖ Removed: ${g.name} (${g.id})`));
-
 
 // ====== BOOT ======
 client.login(token);
