@@ -39,6 +39,9 @@ const DEST_REF_HUB_CHANNEL_ID = '731919732441350215'; // Gymbreakers Referee Dec
 const REF_ROLE_ID    = '731919384179638285'; // Gymbreakers Referee
 const JR_REF_ROLE_ID = '975306021058777149'; // Gymbreakers Junior Referee
 
+// Only re-add this role on /retag_refs
+const RETAG_ROLE_ID  = '963394397687414804';
+
 // ----- Origins (where we LISTEN for disputes) -----
 const GYM_GUILD_ID               = '416850757245992961';
 const GYM_DISPUTE_CHANNEL_ID     = '743575738665533541';
@@ -176,7 +179,7 @@ function buildIntro({ playerName, playerCountry, opponentCountry, originGuildNam
     '• Use `/set issue` to set the issue (Lag, Communication, Device Issue, No Show, Wrong Pokemon or Moveset).',
     '• Use `/set players` to set Disputer & Opponent — the thread title will update automatically.',
     '• Use `/remove_conflicts` any time to purge conflicted referees.',
-    '• Use `/retag_refs` to ping Senior and Junior Referees again.'
+    '• Use `/retag_refs` to ping the specified role again.'
   ].join('\n');
 }
 
@@ -253,6 +256,29 @@ async function addAllRefsToThread(thread, destGuild) {
     added++;
   }
   await thread.send(`👥 Added ${added} referees to this dispute thread.`);
+}
+
+// Add ONLY members who have a specific role to the thread (exclude disputer/opponent)
+async function addRoleMembersToThread(thread, destGuild, roleId) {
+  const meta = refMeta.get(thread.id) || {};
+  const excluded = new Set([meta.p1Id, meta.p2Id].filter(Boolean));
+
+  const all = await destGuild.members.fetch();
+  const targets = all.filter(m => m.roles.cache.has(roleId) && !excluded.has(m.id));
+
+  let added = 0;
+  await thread.members.fetch().catch(() => {});
+  for (const member of targets.values()) {
+    if (!thread.members.cache.has(member.id)) {
+      await thread.members.add(member.id).catch(() => {});
+      added++;
+    }
+  }
+  if (added > 0) {
+    await thread.send(`👥 Added ${added} member(s) with role <@&${roleId}> to this dispute thread.`);
+  } else {
+    await thread.send(`ℹ️ No additional members with role <@&${roleId}> were added.`);
+  }
 }
 
 // Remove conflicted refs already in the thread (match by exact role name or bracket code like [GB])
@@ -699,10 +725,10 @@ const cmdRemoveConflicts = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
-// Retag refs after cleanup
+// Retag (only add members with RETAG_ROLE_ID)
 const cmdRetagRefs = new SlashCommandBuilder()
   .setName('retag_refs')
-  .setDescription('Ping Senior and Junior Referees in this thread again.')
+  .setDescription('Re-add and ping the specified role in this thread.')
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
@@ -1183,23 +1209,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === 'retag_refs') {
     try {
       const destGuild = interaction.guild;
-      // Re-run conflict removal first (idempotent)
+
+      // Re-run conflict removal first (safe & idempotent)
       await removeConflictedFromThread(
         ch,
         destGuild,
         [meta.playerCountry?.name, meta.opponentCountry?.name].filter(Boolean)
       );
-      // Ensure all refs (minus conflicts) are in the thread
-      await addAllRefsToThread(ch, destGuild);
 
-      const ping = `${REF_ROLE_ID ? `<@&${REF_ROLE_ID}>` : ''}${JR_REF_ROLE_ID ? ` <@&${JR_REF_ROLE_ID}>` : ''}`.trim();
-      if (ping.length) {
-        await ch.send(`${ping}\nPlease review this dispute. If you were removed as conflicted, do not rejoin.`);
-      }
-      return interaction.reply({ content: 'Retagged referees.', ephemeral: true });
+      // Add ONLY the specified role holders
+      await addRoleMembersToThread(ch, destGuild, RETAG_ROLE_ID);
+
+      // Ping that role (not global ref roles)
+      await ch.send(`<@&${RETAG_ROLE_ID}>\nPlease review this dispute. If you were removed as conflicted, do not rejoin.`);
+
+      return interaction.reply({ content: 'Retagged the specified role.', ephemeral: true });
     } catch (e) {
       console.error('retag_refs error', e);
-      return interaction.reply({ ephemeral: true, content: 'Failed to retag referees.' });
+      return interaction.reply({ ephemeral: true, content: 'Failed to retag that role.' });
     }
   }
 
@@ -1214,9 +1241,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (origin) {
         const srcGuild = await interaction.client.guilds.fetch(origin.originGuildId).catch(() => null);
         const srcChan = srcGuild ? await srcGuild.channels.fetch(origin.channelId).catch(() => null) : null;
-        if (srcChan?.type === ChannelType.GuildText || srcChan?.type === ChannelType.PublicThread) {
+
+        // Robust: attempt fetch/delete for text or thread channels
+        if (srcChan && 'messages' in srcChan) {
           const msg = await srcChan.messages.fetch(origin.messageId).catch(() => null);
-          if (msg) await msg.delete().catch(() => {});
+          if (msg) {
+            await msg.delete().catch(() => {});
+          } else {
+            // If not found, silently continue
+          }
         }
       }
 
@@ -1418,4 +1451,3 @@ client.on(Events.GuildDelete, g => console.log(`➖ Removed: ${g.name} (${g.id})
 
 // ====== BOOT ======
 client.login(token);
-
