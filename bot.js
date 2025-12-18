@@ -1253,7 +1253,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
-      // DM disputer
+       // DM disputer
       const raiserId = refThreadToPlayer.get(ch.id);
       if (raiserId) {
         try {
@@ -1263,6 +1263,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         } catch {}
       }
 
+      await interaction.reply({ content: '✅ Dispute closed (archived & locked).', ephemeral: false });
       await ch.setArchived(true).catch(() => {});
       await ch.setLocked(true).catch(() => {});
 
@@ -1271,12 +1272,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       refThreadToPlayer.delete(ch.id);
       refThreadToOrigin.delete(ch.id);
 
-      return interaction.reply({ content: '✅ Dispute closed (archived & locked).', ephemeral: false });
+      return;
     } catch (e) {
       console.error('close error', e);
       return interaction.reply({ ephemeral: true, content: 'Failed to close this thread.' });
     }
-  }
 
   if (interaction.commandName === 'decision') {
     // Preflight: require Disputer, Opponent, and Issue
