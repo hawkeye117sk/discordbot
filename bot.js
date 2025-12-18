@@ -704,11 +704,17 @@ const cmdMessage = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
+// ✅ country_post now requires a channel (no auto-find)
 const cmdCountryPost = new SlashCommandBuilder()
   .setName('country_post')
-  .setDescription('Post a message to the origin country channel.')
+  .setDescription('Post a message to a specified channel.')
+  .addChannelOption(o =>
+    o.setName('channel')
+      .setDescription('Where to post it')
+      .setRequired(true)
+      .addChannelTypes(ChannelType.GuildText)
+  )
   .addStringOption(o => o.setName('text').setDescription('Message').setRequired(true))
-  .addChannelOption(o => o.setName('channel').setDescription('Override channel').setRequired(false))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
   .toJSON();
 
@@ -956,14 +962,14 @@ function buildDecisionText(meta, opts, raiserId) {
       break;
 
     // --- Communication ---
-    case 'comm_bad_1': // missed comms to one opponent → 1pt
-    case 'comm_bad':   // back-compat
+    case 'comm_bad_1':
+    case 'comm_bad':
       lines.push('**Did not communicate sufficiently.**');
       lines.push(`Subsequent to 6.1, a penalty point is issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
       break;
 
-    case 'comm_bad_3': // missed comms to both opponents → 3pt
+    case 'comm_bad_3':
       lines.push('**Did not communicate sufficiently (both opponents in the pair).**');
       lines.push(`Subsequent to 6.1, **3 penalty points** are issued in favour of **${favourCountry}**.`);
       lines.push(`The games must be scheduled within **${opts.schedule_window || '24 hours'}**. All games are to be played.`);
@@ -994,7 +1000,7 @@ function buildDecisionText(meta, opts, raiserId) {
       lines.push(`A warning is issued to ${deviceUser}.`);
       break;
 
-    // --- No Show (6.2.4 = 1pt, 6.2.5 = 3pt) ---
+    // --- No Show ---
     case 'ns_p1_1':
       lines.push(`${disputer} **failed to show in time**. Subsequent to 6.2.4 the penalty is **1 penalty point**.`);
       lines.push('The remaining games are to be played.');
@@ -1162,32 +1168,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.reply({ content: 'Sent.', ephemeral: true });
   }
 
+  // ✅ country_post: mandatory channel, no auto find, defer to avoid 10062
   if (interaction.commandName === 'country_post') {
-    let target = interaction.options.getChannel('channel', false);
+    await interaction.deferReply({ flags: 64 }); // 64 = Ephemeral
+
+    const target = interaction.options.getChannel('channel', true);
     const text = interaction.options.getString('text', true);
 
-    if (!target) {
-      const originId = meta.originGuildId;
-      const originGuild = originId ? await interaction.client.guilds.fetch(originId).catch(() => null) : null;
-      if (originGuild) {
-        await originGuild.channels.fetch(); // hydrate cache
-        target = await findDecisionChannel(
-          originGuild,
-          meta.playerCountry?.name,
-          meta.opponentCountry?.name
-        );
-      }
-    }
     if (!target || target.type !== ChannelType.GuildText) {
-      return interaction.reply({ ephemeral: true, content: 'No suitable country channel found (origin). Provide one with the `channel` option.' });
+      return interaction.editReply('❌ Please choose a valid text channel.');
     }
 
     try {
       await target.send(text);
-      await interaction.reply({ content: `Posted to <#${target.id}>.`, ephemeral: false });
+      return interaction.editReply(`✅ Posted to <#${target.id}>.`);
     } catch (e) {
       console.error('country_post error', e);
-      await interaction.reply({ ephemeral: true, content: 'Failed to post to the channel.' });
+      return interaction.editReply('❌ Failed to post to the channel. Check my permissions.');
     }
   }
 
@@ -1230,7 +1227,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
+  // ✅ close: defer first, reply before archive/lock, and fixed brace structure
   if (interaction.commandName === 'close') {
+    await interaction.deferReply({ flags: 64 }); // ephemeral ack to avoid 10062
+
     try {
       // Remove this thread from open lists of both participants
       if (meta.p1Id) removeOpenThreadFor(meta.p1Id, ch.id);
@@ -1242,18 +1242,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const srcGuild = await interaction.client.guilds.fetch(origin.originGuildId).catch(() => null);
         const srcChan = srcGuild ? await srcGuild.channels.fetch(origin.channelId).catch(() => null) : null;
 
-        // Robust: attempt fetch/delete for text or thread channels
         if (srcChan && 'messages' in srcChan) {
           const msg = await srcChan.messages.fetch(origin.messageId).catch(() => null);
-          if (msg) {
-            await msg.delete().catch(() => {});
-          } else {
-            // If not found, silently continue
-          }
+          if (msg) await msg.delete().catch(() => {});
         }
       }
 
-       // DM disputer
+      // DM disputer
       const raiserId = refThreadToPlayer.get(ch.id);
       if (raiserId) {
         try {
@@ -1263,9 +1258,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         } catch {}
       }
 
-      await interaction.reply({ content: '✅ Dispute closed (archived & locked).', ephemeral: false });
-      await ch.setArchived(true).catch(() => {});
+      // Reply while thread is still active (prevents 50083)
+      await interaction.editReply('✅ Dispute closed (archived & locked).');
+
+      // Then lock + archive
       await ch.setLocked(true).catch(() => {});
+      await ch.setArchived(true).catch(() => {});
 
       // Clean in-memory state AFTER closing
       refMeta.delete(ch.id);
@@ -1275,8 +1273,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     } catch (e) {
       console.error('close error', e);
-      return interaction.reply({ ephemeral: true, content: 'Failed to close this thread.' });
+      return interaction.editReply('❌ Failed to close this thread.');
     }
+  }
 
   if (interaction.commandName === 'decision') {
     // Preflight: require Disputer, Opponent, and Issue
@@ -1357,7 +1356,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const override = interaction.options.getChannel('channel', false);
 
     const keys = ['opt1','opt2','opt3','opt4','opt5','opt6']
-      .map((k, idx) => interaction.options.getString(k, idx < 2)) // first two required
+      .map((k, idx) => interaction.options.getString(k, idx < 2))
       .filter(Boolean);
 
     const seen = new Set();
