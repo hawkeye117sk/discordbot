@@ -470,14 +470,13 @@ await message.react('✅').catch(() => {});
     let refThread = disputeThread ? await destGuild.channels
       .fetch(disputeToRefThread.get(disputeThread.id) || '0').catch(() => null) : null;
 
-    if (!refThread) {
-      refThread = await createRefThreadInDestination(destGuild, message);
-      if (disputeThread) disputeToRefThread.set(disputeThread.id, refThread.id);
-    }
+  if (!refThread) {
+  refThread = await createRefThreadInDestination(destGuild, message);
+  if (disputeThread) disputeToRefThread.set(disputeThread.id, refThread.id);
 
-     // 🧵 Thread successfully created
-    await message.react('🧵').catch(() => {});
-    }
+  // 🧵 Thread successfully created
+  await message.react('🧵').catch(() => {});
+}
 
     // Seed meta, mappings (store ORIGIN guild id for later ops)
     refMeta.set(refThread.id, {
