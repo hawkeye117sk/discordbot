@@ -121,6 +121,23 @@ const slug = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^
 const mention = id => id ? `<@${id}>` : '@User';
 const bracketCode = (name) => (name?.match(/\[([^\]]+)\]/)?.[1] || '').toLowerCase();
 
+function getHeadCountry(roleName) {
+  if (!roleName) return null;
+
+  // Remove trailing [TAG]
+  const cleaned = roleName.replace(/\s*\[[^\]]+\]\s*$/, '').trim();
+
+  // Extract "(Parent)" if present
+  const match = cleaned.match(/\(([^)]+)\)$/);
+
+  if (match) {
+    return match[1].trim();
+  }
+
+  // Otherwise, the role itself is the country
+  return cleaned;
+}
+
 function messageMentionsRole(message, roleId) {
   return message.mentions.roles.has(roleId) || message.content.includes(`<@&${roleId}>`);
 }
@@ -292,21 +309,25 @@ async function addRoleMembersToThread(thread, destGuild, roleId) {
 }
 
 // Remove conflicted refs already in the thread (match by exact role name or bracket code like [GB])
-async function removeConflictedFromThread(thread, destGuild, countries /* array of names */) {
-  const countryNames = (countries || []).filter(Boolean);
-  const countryCodes = countryNames.map(bracketCode).filter(Boolean);
+async function removeConflictedFromThread(thread, destGuild, countries) {
+  const involvedHeads = new Set(
+    (countries || [])
+      .filter(Boolean)
+      .map(name => getHeadCountry(name))
+  );
 
   await thread.members.fetch().catch(() => {});
 
   const kicked = [];
+
   for (const tm of thread.members.cache.values()) {
     const gm = await destGuild.members.fetch(tm.id).catch(() => null);
     if (!gm) continue;
 
     const hasConflict = gm.roles.cache.some(r => {
-      if (countryNames.includes(r.name)) return true;
-      const code = bracketCode(r.name);
-      return code && countryCodes.includes(code);
+      if (!/\[.*\]/.test(r.name)) return false; // only country-tag roles
+      const head = getHeadCountry(r.name);
+      return involvedHeads.has(head);
     });
 
     if (hasConflict) {
