@@ -1071,6 +1071,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const meta = refMeta.get(ch.id) || {};
 
   if (interaction.commandName === 'set_players') {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const p1 = interaction.options.getUser('player1', true);
     const p2 = interaction.options.getUser('player2', true);
 
@@ -1085,7 +1086,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await renameThreadByMeta(ch);
     await purgePlayersFromThread(ch, ch.guild);
 
-    return interaction.reply({
+    return interaction.editReply({
   content: `Set: **Disputer:** <@${p1.id}>  •  **Opponent:** <@${p2.id}>`,
     });
   }
@@ -1156,6 +1157,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'message') {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const target = interaction.options.getString('target', true); // p1|p2|both
     const text = interaction.options.getString('text', true);
 
@@ -1180,7 +1182,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     await ch.send(`📤 **Bot DM:** ${text}\n${results.join(' • ')}`);
-    return interaction.reply({ content: 'Sent.', flags: MessageFlags.Ephemeral });
+    return interaction.editReply({ content: 'Sent.', flags: MessageFlags.Ephemeral });
   }
 
   // ✅ country_post: mandatory channel, no auto find, defer to avoid 10062
@@ -1293,9 +1295,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.commandName === 'decision') {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     // Preflight: require Disputer, Opponent, and Issue
     if (!meta.p1Id || !meta.p2Id || !meta.issue) {
-      return interaction.reply({
+      return interaction.editReply({
         flags: MessageFlags.Ephemeral,
         content: 'Cannot post decision: missing Disputer, Opponent, or Issue. Use `/set players` and `/set issue` first.'
       });
@@ -1358,14 +1361,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } else {
         await ch.send(text);
       }
-      return interaction.reply({ content: 'Decision posted.', flags: MessageFlags.Ephemeral });
+      return interaction.editReply({ content: 'Decision posted.', flags: MessageFlags.Ephemeral });
     } catch (e) {
       console.error('decision post error', e);
-      return interaction.reply({ flags: MessageFlags.Ephemeral, content: 'Failed to post decision.' });
+      return interaction.editReply({ flags: MessageFlags.Ephemeral, content: 'Failed to post decision.' });
     }
   }
 
   if (interaction.commandName === 'vote') {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const title = interaction.options.getString('title') || 'Vote time';
     const here  = interaction.options.getBoolean('here');
     const override = interaction.options.getChannel('channel', false);
@@ -1384,11 +1388,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (items.length < 2) {
-      return interaction.reply({ flags: MessageFlags.Ephemeral, content: 'Pick at least two distinct options.' });
+      return interaction.editReply({ flags: MessageFlags.Ephemeral, content: 'Pick at least two distinct options.' });
     }
 
     let target = override || interaction.channel;
-    if (!target) return interaction.reply({ flags: MessageFlags.Ephemeral, content: 'No valid channel to post in.' });
+    if (!target) return interaction.editReply({ flags: MessageFlags.Ephemeral, content: 'No valid channel to post in.' });
 
     const lines = items.map(it => `${it.emoji} : ${it.label}`);
     const content =
@@ -1401,10 +1405,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       for (const it of items) {
         await msg.react(it.emoji).catch(() => {});
       }
-      return interaction.reply({ flags: MessageFlags.Ephemeral, content: `Vote created with ${items.length} option(s).` });
+      return interaction.editReply({ flags: MessageFlags.Ephemeral, content: `Vote created with ${items.length} option(s).` });
     } catch (e) {
       console.error('vote error', e);
-      return interaction.reply({ flags: MessageFlags.Ephemeral, content: 'Failed to post vote (check Add Reactions & Mention Everyone permissions).' });
+      return interaction.editReply({ flags: MessageFlags.Ephemeral, content: 'Failed to post vote (check Add Reactions & Mention Everyone permissions).' });
     }
   }
 });
